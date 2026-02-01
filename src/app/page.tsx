@@ -4,7 +4,7 @@ import { startYieldListener } from '@/lib/yieldListener';
 import { motion } from 'framer-motion';
 import { 
   ShieldCheck, Activity, Zap, ExternalLink, 
-  RotateCcw, Wallet, Terminal, Coins, ArrowRightLeft, Lock, Unlock
+  RotateCcw, Wallet, Terminal, Coins, ArrowRightLeft, Lock, Unlock, Mic, MicOff
 } from 'lucide-react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance } from 'wagmi';
@@ -21,7 +21,6 @@ import {
   POOL_ABI,
 } from '@/lib/constants';
 
-// Fallback is required in case the Provider read fails or is slow to hydrate
 const FALLBACK_POOL_ADDRESS = "0x6Ae43d534944d6df31b761937f20C10B59aF4933";
 
 // --- UI COMPONENTS ---
@@ -56,6 +55,7 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>(["Initializing Neural Link...", "Strategy Engine: ONLINE"]);
   const [mode, setMode] = useState<'EARN' | 'LEVERAGE'>('EARN'); 
   const [mounted, setMounted] = useState(false);
+  const [isListening, setIsListening] = useState(false); // NEW: Voice State
   const lastFetchTime = useRef(0);
   const logContainerRef = useRef<HTMLDivElement>(null);
 
@@ -65,7 +65,6 @@ export default function Home() {
   const { data: hash, writeContract, isPending, error: writeError } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash });
 
-  // Query the AddressProvider to ensure we interact with the latest V3 Pool proxy
   const { data: poolAddress } = useReadContract({
     address: ADDRESS_PROVIDER_ADDRESS,
     abi: PROVIDER_ABI,
@@ -74,7 +73,6 @@ export default function Home() {
   
   const activePool = poolAddress || FALLBACK_POOL_ADDRESS;
 
-  // Sync aWETH Balance (Interest Bearing Token)
   const { data: aBalanceData, refetch: refetchABalance } = useReadContract({
     address: A_WETH_ADDRESS,
     abi: ERC20_ABI,
@@ -83,7 +81,6 @@ export default function Home() {
     query: { enabled: !!userAddress, refetchInterval: 5000 }
   });
 
-  // Fetch critical risk metrics (Health Factor, LTV) from the Pool
   const { data: accountData, refetch: refetchAccount } = useReadContract({
     address: activePool,
     abi: POOL_ABI,
@@ -92,7 +89,6 @@ export default function Home() {
     query: { enabled: !!userAddress, refetchInterval: 5000 }
   });
 
-  // Check USDC Allowance for Repay functionality
   const { data: usdcAllowance, refetch: refetchAllowance } = useReadContract({
     address: USDC_ASSET_ADDRESS,
     abi: ERC20_ABI,
@@ -101,33 +97,72 @@ export default function Home() {
     query: { enabled: !!userAddress, refetchInterval: 2000 }
   });
 
+  // --- NEURAL LINK VOICE LOGIC ---
+  const handleVoiceInput = async (transcript: string) => {
+    addLog(`Neural Link Input: "${transcript}"`);
+    setAdvice("Simulating Scenario...");
+    
+    try {
+      const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            yieldData: apy, 
+            healthFactor: healthRef.current,
+            scenario: transcript 
+          })
+      });
+      const data = await res.json();
+      if (data.advice) {
+        setAdvice(data.advice);
+        addLog("Neural Simulation Complete.");
+      }
+    } catch (err) {
+      addLog("Neural Link Sync Failed.");
+    }
+  };
+
+  const startVoiceCommand = () => {
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    if (!SpeechRecognition) return alert("Browser does not support Speech Recognition");
+
+    const recognition = new SpeechRecognition();
+    recognition.onstart = () => {
+      setIsListening(true);
+      addLog("Neural Link: LISTENING...");
+    };
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      handleVoiceInput(transcript);
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    recognition.start();
+  };
+
   // --- DATA NORMALIZATION ---
   const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 50)); 
   useEffect(() => { if (logContainerRef.current) logContainerRef.current.scrollTop = 0; }, [logs]);
 
-  // Risk Tracking: Sync HF to a ref to prevent stale data in the AI listener
   const formatHealth = (val: bigint) => {
     if (!val) return "---";
     const num = Number(val) / 1e18;
-    // Aave returns uint256 max for infinity; we clamp it for UI cleanliness
     return num > 100 ? "SAFE" : num.toFixed(2);
   };
-  // Adding 'as any' bypasses the index error immediately
-const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---";
+  
+  const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---";
   const healthRef = useRef(healthFactor);
   useEffect(() => { healthRef.current = healthFactor; }, [healthFactor]);
 
-  // Formatting helpers for raw blockchain data (Base 8 vs Base 18)
   const formatBase = (val: bigint) => val ? (Number(val) / 100000000).toFixed(2) : "0.00";
   const totalCollateralUSD = accountData ? formatBase(accountData[0]) : "0.00";
   const totalDebtUSD = accountData ? formatBase(accountData[1]) : "0.00";
   const borrowPowerUSD = accountData ? formatBase(accountData[2]) : "0.00";
   
   const rawABalance = aBalanceData ? parseFloat(formatEther(aBalanceData)) : 0;
-  const formattedABalance = rawABalance.toFixed(4);
-  const usdValue = (rawABalance * ethPrice).toFixed(2);
+  const ethPriceRef = useRef(ethPrice);
+  useEffect(() => { ethPriceRef.current = ethPrice; }, [ethPrice]);
 
-  // Generate simulation data for the yield graph
   const projectionData = useMemo(() => {
     const data = [];
     const monthlyRate = (parseFloat(apy) / 100) / 12;
@@ -139,15 +174,13 @@ const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---"
     return data;
   }, [apy, rawABalance]);
 
-  // Approval Check: Verify if we have enough allowance to cover the repay amount
   const needsApproval = useMemo(() => {
-     if (mode === 'EARN') return false; // ETH uses Gateway, no approval needed
+     if (mode === 'EARN') return false;
      if (!amount || parseFloat(amount) === 0) return false;
-     const amountBig = parseUnits(amount, 6); // USDC = 6 Decimals
+     const amountBig = parseUnits(amount, 6);
      return !usdcAllowance || usdcAllowance < amountBig;
   }, [mode, amount, usdcAllowance]);
 
-  // Oracle Sync: Fetch ETH price for UI conversion
   useEffect(() => {
     const fetchPrice = async () => {
       try {
@@ -160,15 +193,11 @@ const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---"
     fetchPrice();
   }, []);
 
-  // Neural Link: Listen for Yield events and trigger AI analysis
   useEffect(() => {
     setMounted(true);
     const stopListener = startYieldListener(async (newApy) => {
       setApy(newApy);
-      if (Math.random() > 0.9) addLog("Scanning Yield Variance...");
-      
       const now = Date.now();
-      // Rate limit AI calls to prevent API throttle
       if (now - lastFetchTime.current > 60000) { 
         lastFetchTime.current = now;
         try {
@@ -183,35 +212,26 @@ const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---"
       }
     });
     return () => stopListener();
-  }, []);
+  }, [apy]);
 
-  // Transaction Monitor
   useEffect(() => {
     if (isConfirming) addLog("Broadcast: Confirming Transaction...");
     if (isConfirmed) {
       addLog("Success: Ledger Updated.");
-      setAdvice("Execution Verified. State Updated.");
       setAmount(""); 
       refetchABalance();
       refetchAccount();
       refetchAllowance();
     }
-    if (writeError) {
-      addLog(`ERROR: ${writeError.message.slice(0, 20)}...`);
-      alert(writeError.message);
-    }
-  }, [isConfirming, isConfirmed, writeError, refetchABalance, refetchAccount, refetchAllowance]);
+  }, [isConfirming, isConfirmed]);
 
-  // --- STRATEGY EXECUTION ENGINE ---
   const handleExecute = (action: 'PRIMARY' | 'SECONDARY') => {
     if (!userAddress) return alert("Connect Wallet");
     if (!amount || parseFloat(amount) <= 0) return alert("Invalid Amount");
 
-    // EARN MODE: Interactions with WrappedTokenGateway (ETH)
     if (mode === 'EARN') {
         const val = parseEther(amount);
         if (action === 'PRIMARY') { 
-            addLog(`Strategy: Supply ${amount} ETH`);
             writeContract({
                 address: WRAPPED_TOKEN_GATEWAY_ADDRESS,
                 abi: GATEWAY_ABI,
@@ -220,7 +240,6 @@ const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---"
                 value: val,
             });
         } else {
-            addLog(`Strategy: Recall ${amount} ETH`);
             writeContract({
                 address: WRAPPED_TOKEN_GATEWAY_ADDRESS,
                 abi: GATEWAY_ABI,
@@ -228,22 +247,17 @@ const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---"
                 args: [activePool, val, userAddress], 
             });
         }
-    } 
-    // LEVERAGE MODE: Direct interactions with Pool Contract (USDC)
-    else {
-        const val = parseUnits(amount, 6); // Normalizing to 6 decimals
-        if (action === 'PRIMARY') { // BORROW
-            addLog(`Strategy: Borrow ${amount} USDC`);
+    } else {
+        const val = parseUnits(amount, 6);
+        if (action === 'PRIMARY') {
             writeContract({
                 address: activePool, 
                 abi: POOL_ABI,
                 functionName: 'borrow',
                 args: [USDC_ASSET_ADDRESS, val, BigInt(2), 0, userAddress], 
             });
-        } else { // REPAY
-            // If allowance is insufficient, trigger Approve first
+        } else {
             if (needsApproval) {
-                addLog(`Authorization: Approving ${amount} USDC...`);
                 writeContract({
                     address: USDC_ASSET_ADDRESS,
                     abi: ERC20_ABI,
@@ -251,7 +265,6 @@ const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---"
                     args: [activePool, val], 
                 });
             } else {
-                addLog(`Strategy: Repay ${amount} USDC`);
                 writeContract({
                     address: activePool,
                     abi: POOL_ABI,
@@ -339,8 +352,6 @@ const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---"
 
             {/* EXECUTION ENGINE */}
             <motion.div initial={{ opacity: 0, x: 20 }} transition={{ delay: 0.2 }} animate={{ opacity: 1, x: 0 }} className="flex-1 bg-slate-900/40 border border-slate-800 rounded-3xl p-6 flex flex-col relative">
-                
-                {/* STRATEGY TOGGLE */}
                 <div className="flex p-1 bg-black rounded-xl mb-6 border border-slate-800">
                     <button onClick={() => setMode('EARN')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'EARN' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white'}`}>🛡️ Earn (ETH)</button>
                     <button onClick={() => setMode('LEVERAGE')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'LEVERAGE' ? 'bg-purple-600 text-white' : 'text-slate-500 hover:text-white'}`}>⚔️ Leverage (USDC)</button>
@@ -350,21 +361,28 @@ const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---"
                     {mode === 'EARN' ? 'Collateral Management' : 'Debt Acquisition'}
                 </h3>
                 
-                <div className="relative mb-4">
-                    <input type="number" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} className="w-full bg-black border border-slate-700 rounded-xl py-4 pl-4 pr-20 text-2xl font-mono text-white focus:outline-none focus:border-blue-500 transition-colors" />
-                    <div className="absolute right-2 top-2 bottom-2 flex items-center gap-2">
-                        <span className="text-slate-500 font-bold text-xs pr-2">{mode === 'EARN' ? 'ETH' : 'USDC'}</span>
-                    </div>
+                <div className="relative mb-4 flex items-center gap-2">
+                    <input 
+                      type="number" 
+                      placeholder="0.00" 
+                      value={amount} 
+                      onChange={(e) => setAmount(e.target.value)} 
+                      className="flex-1 bg-black border border-slate-700 rounded-xl py-4 pl-4 pr-10 text-2xl font-mono text-white focus:outline-none focus:border-blue-500 transition-colors" 
+                    />
+                    <button 
+                      onClick={startVoiceCommand}
+                      className={`p-4 rounded-xl border transition-all active:scale-95 ${isListening ? 'border-red-500 bg-red-900/20 animate-pulse' : 'border-slate-700 bg-black hover:bg-white/5'}`}
+                    >
+                      {isListening ? <MicOff className="text-red-500" size={20} /> : <Mic className="text-green-500" size={20} />}
+                    </button>
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
-                    {/* BUTTON 1: SUPPLY / BORROW */}
                     <button onClick={() => handleExecute('PRIMARY')} disabled={isPending || isConfirming} className={`py-4 rounded-xl font-black tracking-widest uppercase text-xs shadow-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50 ${mode === 'EARN' ? 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/30' : 'bg-purple-600 hover:bg-purple-500 shadow-purple-900/30'}`}>
                        {isPending ? <Activity className="animate-spin" size={16}/> : mode === 'EARN' ? <Zap size={16}/> : <Coins size={16}/>}
                        {mode === 'EARN' ? 'Supply' : 'Borrow'}
                     </button>
 
-                    {/* BUTTON 2: RECALL / REPAY (Smart) */}
                     <button onClick={() => handleExecute('SECONDARY')} disabled={isPending || isConfirming} className="border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 hover:bg-white/5 py-4 rounded-xl font-bold tracking-widest uppercase text-xs flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50">
                         {mode === 'EARN' ? <RotateCcw size={16}/> : needsApproval ? <Lock size={16}/> : <Unlock size={16}/>}
                         {mode === 'EARN' ? 'Recall' : needsApproval ? 'Unlock USDC' : 'Repay Debt'}

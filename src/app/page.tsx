@@ -46,23 +46,41 @@ const CustomTooltip = ({ active, payload }: any) => {
   return null;
 };
 
+// Heatmap Component
+const HealthBar = ({ factor }: { factor: string | number }) => {
+    const val = factor === 'SAFE' || factor === '---' ? 3.0 : Number(factor);
+    const percentage = Math.min((val / 3.0) * 100, 100);
+    
+    let colorClass = 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]';
+    if (val < 1.1) colorClass = 'bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.8)] animate-pulse';
+    else if (val < 1.5) colorClass = 'bg-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.5)]';
+
+    return (
+        <div className="w-full bg-slate-800/50 rounded-full h-1.5 mt-3 overflow-hidden border border-white/5">
+            <motion.div 
+                initial={{ width: 0 }}
+                animate={{ width: `${percentage}%` }}
+                className={`h-full transition-all duration-700 ${colorClass}`}
+            />
+        </div>
+    );
+};
+
 export default function Home() {
-  // --- SYSTEM STATE ---
+  // --- STATE ---
   const [apy, setApy] = useState("0.00");
-  const [ethPrice, setEthPrice] = useState(0); 
   const [advice, setAdvice] = useState("System Initialized. Select Strategy.");
   const [amount, setAmount] = useState(""); 
   const [logs, setLogs] = useState<string[]>(["Initializing Neural Link...", "Strategy Engine: ONLINE"]);
   const [mode, setMode] = useState<'EARN' | 'LEVERAGE'>('EARN'); 
   const [mounted, setMounted] = useState(false);
-  const [isListening, setIsListening] = useState(false); // NEW: Voice State
+  const [isListening, setIsListening] = useState(false); 
   const lastFetchTime = useRef(0);
   const logContainerRef = useRef<HTMLDivElement>(null);
 
-  // --- BLOCKCHAIN SYNC (WAGMI) ---
+  // --- WAGMI ---
   const { address: userAddress } = useAccount();
-  const { data: ethBalance } = useBalance({ address: userAddress }); 
-  const { data: hash, writeContract, isPending, error: writeError } = useWriteContract();
+  const { data: hash, writeContract, isPending } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash });
 
   const { data: poolAddress } = useReadContract({
@@ -97,11 +115,47 @@ export default function Home() {
     query: { enabled: !!userAddress, refetchInterval: 2000 }
   });
 
-  // --- NEURAL LINK VOICE LOGIC ---
+  // --- LOGIC ---
+  const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 50)); 
+  useEffect(() => { if (logContainerRef.current) logContainerRef.current.scrollTop = 0; }, [logs]);
+
+  const formatHealth = (val: bigint) => {
+    if (!val) return "---";
+    const num = Number(val) / 1e18;
+    return num > 100 ? "SAFE" : num.toFixed(2);
+  };
+  const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---";
+  const healthRef = useRef(healthFactor);
+  useEffect(() => { healthRef.current = healthFactor; }, [healthFactor]);
+
+  const formatBase = (val: bigint) => val ? (Number(val) / 100000000).toFixed(2) : "0.00";
+  const totalCollateralUSD = accountData ? formatBase(accountData[0]) : "0.00";
+  const totalDebtUSD = accountData ? formatBase(accountData[1]) : "0.00";
+  const borrowPowerUSD = accountData ? formatBase(accountData[2]) : "0.00";
+  const rawABalance = aBalanceData ? parseFloat(formatEther(aBalanceData)) : 0;
+  
+  const projectionData = useMemo(() => {
+    const data = [];
+    const monthlyRate = (parseFloat(apy) / 100) / 12;
+    let current = rawABalance > 0 ? rawABalance : 1; 
+    for (let i = 0; i <= 12; i++) {
+      data.push({ name: `M${i}`, value: parseFloat(current.toFixed(4)) });
+      current = current * (1 + monthlyRate);
+    }
+    return data;
+  }, [apy, rawABalance]);
+
+  const needsApproval = useMemo(() => {
+     if (mode === 'EARN') return false;
+     if (!amount || parseFloat(amount) === 0) return false;
+     const amountBig = parseUnits(amount, 6);
+     return !usdcAllowance || usdcAllowance < amountBig;
+  }, [mode, amount, usdcAllowance]);
+
+  // --- VOICE HANDLER ---
   const handleVoiceInput = async (transcript: string) => {
     addLog(`Neural Link Input: "${transcript}"`);
     setAdvice("Simulating Scenario...");
-    
     try {
       const res = await fetch('/api/analyze', {
           method: 'POST',
@@ -127,72 +181,26 @@ export default function Home() {
     if (!SpeechRecognition) return alert("Browser does not support Speech Recognition");
 
     const recognition = new SpeechRecognition();
-    recognition.onstart = () => {
-      setIsListening(true);
-      addLog("Neural Link: LISTENING...");
-    };
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      handleVoiceInput(transcript);
-    };
+    recognition.onstart = () => { setIsListening(true); addLog("Neural Link: LISTENING..."); };
+    recognition.onresult = (event: any) => { handleVoiceInput(event.results[0][0].transcript); };
     recognition.onerror = () => setIsListening(false);
     recognition.onend = () => setIsListening(false);
     recognition.start();
   };
 
-  // --- DATA NORMALIZATION ---
-  const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 50)); 
-  useEffect(() => { if (logContainerRef.current) logContainerRef.current.scrollTop = 0; }, [logs]);
-
-  const formatHealth = (val: bigint) => {
-    if (!val) return "---";
-    const num = Number(val) / 1e18;
-    return num > 100 ? "SAFE" : num.toFixed(2);
-  };
-  
-  const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---";
-  const healthRef = useRef(healthFactor);
-  useEffect(() => { healthRef.current = healthFactor; }, [healthFactor]);
-
-  const formatBase = (val: bigint) => val ? (Number(val) / 100000000).toFixed(2) : "0.00";
-  const totalCollateralUSD = accountData ? formatBase(accountData[0]) : "0.00";
-  const totalDebtUSD = accountData ? formatBase(accountData[1]) : "0.00";
-  const borrowPowerUSD = accountData ? formatBase(accountData[2]) : "0.00";
-  
-  const rawABalance = aBalanceData ? parseFloat(formatEther(aBalanceData)) : 0;
-  const ethPriceRef = useRef(ethPrice);
-  useEffect(() => { ethPriceRef.current = ethPrice; }, [ethPrice]);
-
-  const projectionData = useMemo(() => {
-    const data = [];
-    const monthlyRate = (parseFloat(apy) / 100) / 12;
-    let current = rawABalance > 0 ? rawABalance : 1; 
-    for (let i = 0; i <= 12; i++) {
-      data.push({ name: `M${i}`, value: parseFloat(current.toFixed(4)) });
-      current = current * (1 + monthlyRate);
-    }
-    return data;
-  }, [apy, rawABalance]);
-
-  const needsApproval = useMemo(() => {
-     if (mode === 'EARN') return false;
-     if (!amount || parseFloat(amount) === 0) return false;
-     const amountBig = parseUnits(amount, 6);
-     return !usdcAllowance || usdcAllowance < amountBig;
-  }, [mode, amount, usdcAllowance]);
-
+  // --- INIT ---
   useEffect(() => {
     const fetchPrice = async () => {
       try {
         const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
         const data = await res.json();
-        setEthPrice(data.ethereum.usd);
         addLog(`Oracle Connected: ETH = $${data.ethereum.usd}`);
       } catch (err) { addLog("Oracle Connection Failed."); }
     };
     fetchPrice();
   }, []);
 
+  // --- LISTENER FIX ---
   useEffect(() => {
     setMounted(true);
     const stopListener = startYieldListener(async (newApy) => {
@@ -212,7 +220,7 @@ export default function Home() {
       }
     });
     return () => stopListener();
-  }, [apy]);
+  }, []); 
 
   useEffect(() => {
     if (isConfirming) addLog("Broadcast: Confirming Transaction...");
@@ -293,7 +301,6 @@ export default function Home() {
       </header>
 
       <div className="p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-4rem)]">
-        
         {/* LEFT COLUMN */}
         <div className="lg:col-span-7 flex flex-col gap-6">
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="flex-1 bg-slate-900/40 border border-slate-800 rounded-3xl p-6 relative overflow-hidden">
@@ -329,11 +336,8 @@ export default function Home() {
 
         {/* RIGHT COLUMN */}
         <div className="lg:col-span-5 flex flex-col gap-6">
-            
-            {/* RISK SENTINEL */}
             <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 relative overflow-hidden">
-                <div className={`absolute top-0 right-0 w-32 h-32 blur-3xl rounded-full opacity-20 -mr-10 -mt-10 transition-colors duration-1000 ${healthFactor === 'SAFE' ? 'bg-green-500' : Number(healthFactor) < 1.5 ? 'bg-red-500' : 'bg-yellow-500'}`} />
-                <div className="flex justify-between items-start mb-4 relative z-10">
+                <div className="flex justify-between items-start mb-2 relative z-10">
                     <div>
                         <span className="text-[10px] text-slate-500 tracking-[0.3em] uppercase font-bold flex items-center gap-2"><Activity size={10} /> Risk Sentinel</span>
                         <h3 className="text-white font-bold text-lg mt-1">Account Health</h3>
@@ -343,7 +347,11 @@ export default function Home() {
                          <span className={`text-2xl font-black tracking-tighter ${healthFactor === 'SAFE' ? 'text-green-400' : Number(healthFactor) < 1.5 ? 'text-red-500' : 'text-yellow-400'}`}>{healthFactor}</span>
                     </div>
                 </div>
-                <div className="grid grid-cols-3 gap-2 relative z-10">
+                
+                {/* Visual Risk Heatmap */}
+                <HealthBar factor={healthFactor} />
+
+                <div className="grid grid-cols-3 gap-2 relative z-10 mt-6">
                     <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Collateral</span><span className="text-sm font-mono text-white">${totalCollateralUSD}</span></div>
                     <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Debt</span><span className="text-sm font-mono text-red-300">${totalDebtUSD}</span></div>
                     <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Power</span><span className="text-sm font-mono text-blue-300">${borrowPowerUSD}</span></div>
@@ -361,20 +369,23 @@ export default function Home() {
                     {mode === 'EARN' ? 'Collateral Management' : 'Debt Acquisition'}
                 </h3>
                 
-                <div className="relative mb-4 flex items-center gap-2">
+                <div className="relative mb-4">
                     <input 
                       type="number" 
                       placeholder="0.00" 
                       value={amount} 
                       onChange={(e) => setAmount(e.target.value)} 
-                      className="flex-1 bg-black border border-slate-700 rounded-xl py-4 pl-4 pr-10 text-2xl font-mono text-white focus:outline-none focus:border-blue-500 transition-colors" 
+                      className="w-full bg-black border border-slate-700 rounded-xl py-4 pl-4 pr-16 text-2xl font-mono text-white focus:outline-none focus:border-blue-500 transition-colors" 
                     />
-                    <button 
-                      onClick={startVoiceCommand}
-                      className={`p-4 rounded-xl border transition-all active:scale-95 ${isListening ? 'border-red-500 bg-red-900/20 animate-pulse' : 'border-slate-700 bg-black hover:bg-white/5'}`}
-                    >
-                      {isListening ? <MicOff className="text-red-500" size={20} /> : <Mic className="text-green-500" size={20} />}
-                    </button>
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                      <button 
+                        onClick={startVoiceCommand}
+                        className={`p-2 rounded-lg transition-all active:scale-90 ${isListening ? 'text-red-500 bg-red-900/20 animate-pulse' : 'text-green-500 hover:bg-white/5'}`}
+                        title="Activate Neural Link"
+                      >
+                        {isListening ? <MicOff size={20} /> : <Mic size={20} />}
+                      </button>
+                    </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">

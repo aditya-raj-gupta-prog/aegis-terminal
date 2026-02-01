@@ -112,7 +112,8 @@ export default function Home() {
     // Aave returns uint256 max for infinity; we clamp it for UI cleanliness
     return num > 100 ? "SAFE" : num.toFixed(2);
   };
-  const healthFactor = accountData ? formatHealth(accountData[5]) : "---";
+  // Adding 'as any' bypasses the index error immediately
+const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---";
   const healthRef = useRef(healthFactor);
   useEffect(() => { healthRef.current = healthFactor; }, [healthFactor]);
 

@@ -95,7 +95,7 @@ export default function Home() {
   const simTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   // --- WAGMI ---
-  const { address: userAddress } = useAccount();
+  const { address: userAddress, isConnected } = useAccount();
   const { data: hash, writeContract, isPending } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash });
 
@@ -310,9 +310,11 @@ export default function Home() {
 
   // --- LIVE APY ENGINE ---
   // Tick every few seconds applying a small +/- micro-fluctuation so the yield
-  // reads as a live, volatile stream. Functional update avoids stale closures
-  // and the empty dep array means this interval is created exactly once.
+  // reads as a live, volatile stream. Gated on the wallet connection: the float
+  // only runs once a wallet is connected, so a disconnected dashboard stays at
+  // its static baseline. Functional update avoids stale closures.
   useEffect(() => {
+    if (!isConnected) return;
     const id = setInterval(() => {
       setApy(prev => {
         const current = parseFloat(prev) || 4.12;
@@ -325,7 +327,11 @@ export default function Home() {
       });
     }, 3000);
     return () => clearInterval(id);
-  }, []);
+  }, [isConnected]);
+
+  // Header display value: force a flat 0.00% whenever no wallet is connected,
+  // regardless of the last simulated APY held in state.
+  const displayApy = isConnected ? apy : "0.00";
 
   const formatBase = (val: bigint) => val ? (Number(val) / 100000000).toFixed(2) : "0.00";
   const totalCollateralUSD = accountData ? formatBase((accountData as readonly bigint[])[0]) : "0.00";
@@ -339,9 +345,33 @@ export default function Home() {
   // active wallet balance over time so each on-chain change pushes a new,
   // distinct coordinate — giving the line real dips/spikes instead of a flat,
   // statically-seeded projection curve.
-  // Starts completely empty so a new user begins with a fresh grid rather than
-  // any hardcoded testnet baseline; the first live balance reading seeds it.
+  // Starts empty; the address-keyed loader below hydrates it from localStorage
+  // (per-wallet history) and the balance listener seeds/extends it. Reading
+  // localStorage here in the initializer would break SSR hydration, so we load
+  // it in an effect instead.
   const [chartData, setChartData] = useState<{ name: string; value: number }[]>([]);
+  // Tracks which wallet the current chartData belongs to, so the balance
+  // listener never appends to a series that hasn't been (re)loaded yet.
+  const historyAddrRef = useRef<string | null>(null);
+  const historyKey = (addr: string) => `chart_history_${addr}`;
+
+  // Per-wallet history loader. Runs on every address change (incl. account
+  // switches in MetaMask): flush the previous series and load the new address's
+  // saved history, or reset to empty so the balance listener can re-seed it.
+  useEffect(() => {
+    historyAddrRef.current = userAddress ?? null;
+    if (!userAddress) {
+      setChartData([]);
+      return;
+    }
+    try {
+      const saved = localStorage.getItem(historyKey(userAddress));
+      const parsed = saved ? JSON.parse(saved) : null;
+      setChartData(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      setChartData([]);
+    }
+  }, [userAddress]);
 
   // Listen to the live balance coming from our wallet hook. The first reading
   // seeds the series as the baseline coordinate; afterwards, whenever the balance
@@ -350,11 +380,22 @@ export default function Home() {
     // Prefer the native ETH balance; fall back to the staked aToken balance.
     const active = liveEthBalance > 0 ? liveEthBalance : rawABalance;
     if (!userAddress || active <= 0) return;
+    // Wait until the loader has synced history for this exact address.
+    if (historyAddrRef.current !== userAddress) return;
 
     const point = parseFloat(active.toFixed(6));
     setChartData(prev => {
-      // Empty series: seed with the current balance as the single baseline point.
-      if (prev.length === 0) return [{ name: new Date().toLocaleTimeString(), value: point }];
+      // Empty series (no saved history): seed with TWO coordinates at the current
+      // balance — a baseline start point and an active point. A single point only
+      // renders a dot; two points give Recharts an actual line path to draw a
+      // clean, flat horizontal baseline that then scales up as movement arrives.
+      if (prev.length === 0) {
+        const now = new Date().toLocaleTimeString();
+        return [
+          { name: `${now} ·`, value: point },
+          { name: now, value: point },
+        ];
+      }
 
       const last = prev[prev.length - 1];
       // Skip if the balance hasn't moved — avoids piling up identical points.
@@ -364,6 +405,18 @@ export default function Home() {
       return next.slice(-40);
     });
   }, [liveEthBalance, rawABalance, userAddress]);
+
+  // Persist the series back to localStorage under the active wallet's key
+  // whenever it changes (seed or append), so history survives reloads per wallet.
+  useEffect(() => {
+    if (!userAddress || historyAddrRef.current !== userAddress) return;
+    if (chartData.length === 0) return;
+    try {
+      localStorage.setItem(historyKey(userAddress), JSON.stringify(chartData));
+    } catch {
+      /* storage unavailable / quota exceeded — non-fatal */
+    }
+  }, [chartData, userAddress]);
 
   // Tight, data-driven Y-axis bounds so even a 0.0001 ETH change renders as a
   // visible dip/spike instead of being flattened against a 0-based axis.
@@ -599,13 +652,13 @@ export default function Home() {
                 <div>
                     <h2 className="text-slate-500 text-[10px] uppercase tracking-[0.3em] mb-1">Live Yield Metric</h2>
                     <div className="flex items-center gap-3">
-                        <span className="text-6xl font-black text-white tracking-tighter tabular-nums text-glow-cyan">{apy}%</span>
+                        <span className="text-6xl font-black text-white tracking-tighter tabular-nums text-glow-cyan">{displayApy}%</span>
                         <span className="text-cyan-300 text-xs font-bold bg-cyan-900/30 px-2 py-1 rounded border border-cyan-500/20">APY</span>
                     </div>
                 </div>
                 <div className="text-right">
                      <h3 className="text-slate-500 text-[10px] uppercase tracking-widest mb-1">Projected Growth</h3>
-                     <span className="text-2xl font-bold text-cyan-400 tabular-nums">+{(parseFloat(apy)/12).toFixed(2)}% <span className="text-xs text-slate-500">/mo</span></span>
+                     <span className="text-2xl font-bold text-cyan-400 tabular-nums">+{(parseFloat(displayApy)/12).toFixed(2)}% <span className="text-xs text-slate-500">/mo</span></span>
                 </div>
             </div>
             <div className="h-48 w-full">

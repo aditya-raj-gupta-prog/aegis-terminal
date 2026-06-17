@@ -844,7 +844,7 @@ export default function Home() {
             <ShieldCheck className="text-slate-950" size={18} />
           </div>
           <span className="text-xl font-black tracking-tighter uppercase italic bg-gradient-to-r from-cyan-300 to-blue-400 bg-clip-text text-transparent">
-            Aegis Command
+            Aegis Terminal
           </span>
         </div>
         <div className="flex items-center gap-4">

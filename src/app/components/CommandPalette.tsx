@@ -5,6 +5,7 @@ import { motion } from 'framer-motion';
 import { Terminal, CornerDownLeft } from 'lucide-react';
 
 const HINTS = [
+  { cmd: 'supply 0.5 eth', desc: 'Natural-language intent → staging sheet' },
   { cmd: '/supply 10', desc: 'Stage a supply transaction' },
   { cmd: '/scan 0x...', desc: 'Run a contract security scan' },
   { cmd: '/gas-priority', desc: 'Fetch live gas + priority fee' },

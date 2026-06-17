@@ -15,8 +15,8 @@ import {
 } from 'lucide-react';
 import { useAudioTelemetry } from '@/lib/useAudioTelemetry';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber, useChainId } from 'wagmi';
-import { sepolia } from 'wagmi/chains';
+import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber, useChainId, useEnsName, useEnsAvatar } from 'wagmi';
+import { sepolia, mainnet } from 'wagmi/chains';
 import { parseEther, formatEther, parseUnits } from 'viem';
 import { AreaChart, Area, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import {
@@ -107,6 +107,13 @@ export default function Home() {
   const { address: userAddress, isConnected } = useAccount();
   // Active network — drives the switcher HUD, gas ticker, and chain-isolated history.
   const chainId = useChainId();
+
+  // --- ENS PROFILE RESOLUTION ---
+  // ENS lives on mainnet, so resolve against mainnet regardless of the active
+  // chain. Falls back to the truncated hex address when no record exists.
+  const { data: ensName } = useEnsName({ address: userAddress, chainId: mainnet.id });
+  const { data: ensAvatar } = useEnsAvatar({ name: ensName ?? undefined, chainId: mainnet.id });
+  const profileLabel = ensName ?? (userAddress ? `${userAddress.slice(0, 6)}…${userAddress.slice(-4)}` : '');
   const { data: hash, writeContract, isPending } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash });
 
@@ -176,6 +183,25 @@ export default function Home() {
   const processCommand = (raw: string) => {
     const input = raw.trim().replace(/^\//, '');
     if (!input) return;
+
+    // --- NATURAL LANGUAGE TRANSACTION PARSER ---
+    // Capture plain-English intents like "supply 0.5 eth" / "earn 100 usdc":
+    // an action verb, a number, and an optional asset token.
+    const nl = input.match(/^(supply|earn|deposit|stake)\s+([0-9]*\.?[0-9]+)\s*(eth|weth|usdc|usdt|dai)?\b/i);
+    if (nl) {
+      const verb = nl[1].toLowerCase();
+      const amt = nl[2];
+      const asset = (nl[3] || (verb === 'earn' ? 'usdc' : 'eth')).toUpperCase();
+      const kind: 'supply' | 'earn' = verb === 'earn' ? 'earn' : 'supply';
+      playClick();
+      setMode('EARN');          // both map to Collateral Management
+      setAmount(amt);           // auto-fill the execution input field
+      addLog(`root@aegis:~$ ${input}`);
+      addLog(`[NLP] Intent parsed → ${kind.toUpperCase()} ${amt} ${asset}. Opening staging sheet.`);
+      // Build the sheet directly from the parsed amount (amount state is async).
+      setStaging({ kind, amount: amt, ...mockPreflight() });
+      return;
+    }
 
     const [cmd, ...rest] = input.split(/\s+/);
     const lower = cmd.toLowerCase();
@@ -741,13 +767,21 @@ export default function Home() {
           </button>
           <NetworkSwitcher />
           {userAddress && (
-            <div className="hidden sm:flex flex-col items-end leading-tight">
-              <span className="text-[10px] text-slate-500 uppercase tracking-widest flex items-center gap-1">
-                <Wallet size={10} /> {`${userAddress.slice(0, 6)}…${userAddress.slice(-4)}`}
-              </span>
-              <span className="text-xs font-mono text-cyan-300">
-                {liveEthBalance.toFixed(4)} {ethBalance?.symbol ?? 'ETH'}
-              </span>
+            <div className="hidden sm:flex items-center gap-2 leading-tight">
+              {ensAvatar ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={ensAvatar} alt="ENS avatar" className="w-7 h-7 rounded-full object-cover border border-white/10" />
+              ) : (
+                <div className="w-7 h-7 rounded-full bg-cyan-500/10 border border-white/10 flex items-center justify-center">
+                  <Wallet size={12} className="text-cyan-300" />
+                </div>
+              )}
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] text-slate-300 tracking-widest font-mono">{profileLabel}</span>
+                <span className="text-xs font-mono text-cyan-300">
+                  {liveEthBalance.toFixed(4)} {ethBalance?.symbol ?? 'ETH'}
+                </span>
+              </div>
             </div>
           )}
           <ConnectButton showBalance={false} chainStatus="icon" />

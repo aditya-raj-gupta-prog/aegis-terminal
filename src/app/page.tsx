@@ -16,6 +16,7 @@ import {
   Volume2, VolumeX, Columns2, LayoutGrid, FlaskConical
 } from 'lucide-react';
 import { useAudioTelemetry } from '@/lib/useAudioTelemetry';
+import { getWhaleAlias, WHALE_THRESHOLD_ETH } from '@/lib/whales';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber, useChainId, useEnsName, useEnsAvatar, usePublicClient } from 'wagmi';
 import { sepolia, mainnet } from 'wagmi/chains';
@@ -54,17 +55,26 @@ const panelVariant = {
 };
 
 // --- UI COMPONENTS ---
-const LogLine = ({ text }: { text: string }) => (
-  <motion.div
-    initial={{ opacity: 0, x: -10 }}
-    animate={{ opacity: 1, x: 0 }}
-    transition={{ type: "spring", stiffness: 180, damping: 22 }}
-    className="text-[10px] font-mono text-cyan-300/80 mb-1 border-l-2 border-cyan-500/30 pl-2"
-  >
-    <span className="opacity-50 mr-2">[{new Date().toLocaleTimeString()}]</span>
-    {text}
-  </motion.div>
-);
+const LogLine = ({ text }: { text: string }) => {
+  // High-priority whale / critical alerts render as crimson-glowing blocks.
+  const critical = text.startsWith('[CRITICAL]') || text.includes('🐋');
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -10 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ type: "spring", stiffness: 180, damping: 22 }}
+      className={`text-[10px] font-mono mb-1 border-l-2 pl-2 ${
+        critical
+          ? 'text-red-300 border-red-500 bg-red-500/5 py-0.5 rounded-r'
+          : 'text-cyan-300/80 border-cyan-500/30'
+      }`}
+      style={critical ? { textShadow: '0 0 10px rgba(239,68,68,0.6)' } : undefined}
+    >
+      <span className="opacity-50 mr-2">[{new Date().toLocaleTimeString()}]</span>
+      {text}
+    </motion.div>
+  );
+};
 
 const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: { value: number }[] }) => {
   if (active && payload && payload.length) {
@@ -560,12 +570,13 @@ export default function Home() {
     refetchAccount();
   }, [blockNumber, userAddress]);
 
-  // --- LIVE BLOCK TELEMETRY FEED ---
-  // Subscribe to new blocks on the active chain via the viem public client and
-  // stream a stylized entry into the Neural Logs. The subscription is keyed on
-  // publicClient + chainId, so switching networks via the HUD cleanly tears the
-  // old watcher down and re-initializes for the new chain. The FIFO cap inside
-  // addLog keeps the buffer bounded so the background loop never bloats memory.
+  // --- LIVE BLOCK TELEMETRY FEED + WHALE SENTINEL ---
+  // Subscribe to new blocks (with full transactions) on the active chain via the
+  // viem public client. Each block emits a stylized telemetry line AND is scanned
+  // for whale activity: any tx whose sender/recipient is in the monitored array
+  // or whose native value exceeds the threshold raises a crimson alert + audio
+  // warning. Keyed on publicClient + chainId so switching networks tears the old
+  // watcher down cleanly; addLog's FIFO cap keeps the buffer bounded.
   const publicClient = usePublicClient();
   useEffect(() => {
     if (!publicClient) return;
@@ -573,6 +584,7 @@ export default function Home() {
 
     const unwatch = publicClient.watchBlocks({
       emitMissed: false,
+      includeTransactions: true,
       // L2s mint far faster — sample on a calmer cadence so the feed reads as
       // batch-confirmation pulses rather than flooding the console.
       pollingInterval: isL2 ? 3000 : 8000,
@@ -584,6 +596,27 @@ export default function Home() {
         } else {
           addLog(`📦 [BLOCK #${block.number}] Gas Price: ${gwei} Gwei | Transactions: ${txns}`);
         }
+
+        // Whale sentinel sweep over this block's transactions.
+        type FullTx = { from: string; to: string | null; value: bigint };
+        const txList = block.transactions as unknown as FullTx[];
+        let alerted = false;
+        let emitted = 0;
+        for (const tx of txList) {
+          if (!tx || typeof tx.from !== 'string') continue;
+          const valueEth = tx.value ? Number(formatEther(tx.value)) : 0;
+          const fromAlias = getWhaleAlias(tx.from);
+          const toAlias = getWhaleAlias(tx.to);
+          const isBig = valueEth >= WHALE_THRESHOLD_ETH;
+          if (!fromAlias && !toAlias && !isBig) continue;
+
+          const sender = fromAlias ?? `${tx.from.slice(0, 6)}…${tx.from.slice(-4)}`;
+          const dest = tx.to ? (toAlias ?? `${tx.to.slice(0, 6)}…${tx.to.slice(-4)}`) : 'contract creation';
+          addLog(`[CRITICAL] 🐋 WHALE ALERT: ${sender} transferred ${valueEth.toFixed(2)} ETH to ${dest}`);
+          alerted = true;
+          if (++emitted >= 4) break; // cap alerts per block to avoid flooding
+        }
+        if (alerted) playWarn();
       },
       onError: () => {
         addLog("[SYS] Block telemetry stream interrupted — retrying...");
@@ -591,7 +624,7 @@ export default function Home() {
     });
 
     return () => unwatch();
-  }, [publicClient, chainId]);
+  }, [publicClient, chainId, playWarn]);
 
   const needsApproval = useMemo(() => {
      if (mode === 'EARN') return false;

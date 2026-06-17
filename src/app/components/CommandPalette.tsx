@@ -10,6 +10,7 @@ const HINTS = [
   { cmd: '/scan 0x...', desc: 'Run a contract security scan' },
   { cmd: '/gas-priority', desc: 'Fetch live gas + priority fee' },
   { cmd: '/split', desc: 'Toggle split-pane tiling' },
+  { cmd: '/sandbox', desc: 'Open the flash-loan arbitrage simulator' },
   { cmd: '/status', desc: 'Report core engine vitals' },
   { cmd: '/clear', desc: 'Wipe the terminal buffer' },
 ];

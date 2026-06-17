@@ -9,10 +9,11 @@ import StagingSheet, { type MevCheck } from './components/StagingSheet';
 import NetworkSwitcher from './components/NetworkSwitcher';
 import GasTicker from './components/GasTicker';
 import ContractInspector from './components/ContractInspector';
+import FlashLoanSandbox from './components/FlashLoanSandbox';
 import {
   ShieldCheck, Activity, Zap, RotateCcw, Wallet, Terminal,
   Coins, Lock, Unlock, Mic, MicOff, Command as CommandIcon,
-  Volume2, VolumeX, Columns2, LayoutGrid
+  Volume2, VolumeX, Columns2, LayoutGrid, FlaskConical
 } from 'lucide-react';
 import { useAudioTelemetry } from '@/lib/useAudioTelemetry';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
@@ -96,6 +97,8 @@ export default function Home() {
   const [staging, setStaging] = useState<{ kind: 'supply' | 'earn'; amount: string; gas: string; slippage: string; checks: MevCheck[] } | null>(null);
   // Live verified-contract explorer target (set by `/scan [address]`).
   const [inspector, setInspector] = useState<string | null>(null);
+  // Flash-loan / arbitrage sandbox simulator (`/sandbox` or header button).
+  const [sandboxOpen, setSandboxOpen] = useState(false);
   // Split-pane tiling toggle (Alt+S or `/split`): graph + terminal side by side.
   const [splitView, setSplitView] = useState(false);
   const lastFetchTime = useRef(0);
@@ -231,7 +234,7 @@ export default function Home() {
 
     // Audio feedback: a crisp click for recognized commands, a warning drone for
     // anything unrecognized.
-    const KNOWN = ['help', 'clear', 'check-gas', 'gas-priority', 'scan', 'supply', 'status', 'split'];
+    const KNOWN = ['help', 'clear', 'check-gas', 'gas-priority', 'scan', 'supply', 'status', 'split', 'sandbox', 'arb'];
     if (KNOWN.includes(lower)) playClick(); else playWarn();
 
     // `clear` wipes the buffer outright — no command echo to keep the wipe clean.
@@ -255,6 +258,7 @@ export default function Home() {
           "  supply [amount] open the pre-flight staging sheet",
           "  status          report core engine vitals",
           "  split           toggle split-pane tiling (graph + logs)",
+          "  sandbox         open the flash-loan arbitrage simulator",
         ]);
         break;
       case 'check-gas':
@@ -303,6 +307,11 @@ export default function Home() {
       case 'split':
         setSplitView(v => !v);
         addLog("[SYS] Split-pane tiling toggled.");
+        break;
+      case 'sandbox':
+      case 'arb':
+        setSandboxOpen(true);
+        addLog("[SYS] Flash-loan arbitrage sandbox engaged.");
         break;
       default:
         addLog("Command not recognized. Type 'help' for options.");
@@ -822,6 +831,13 @@ export default function Home() {
             {splitView ? <Columns2 size={14} /> : <LayoutGrid size={14} />}
           </button>
           <button
+            onClick={() => { playClick(); setSandboxOpen(true); }}
+            className="p-2 rounded-lg border text-slate-400 border-white/10 hover:text-white hover:border-white/20 transition-colors"
+            title="Flash-loan arbitrage sandbox (/sandbox)"
+          >
+            <FlaskConical size={14} />
+          </button>
+          <button
             onClick={toggleSound}
             className={`p-2 rounded-lg border transition-colors ${soundMuted ? 'text-slate-500 border-white/10 hover:text-white' : 'text-cyan-300 border-cyan-500/40 bg-cyan-500/10'}`}
             title={soundMuted ? 'Unmute interface sounds' : 'Mute interface sounds'}
@@ -989,6 +1005,11 @@ export default function Home() {
         {inspector && (
           <ContractInspector address={inspector} onClose={() => setInspector(null)} />
         )}
+      </AnimatePresence>
+
+      {/* FLASH LOAN & ARBITRAGE SANDBOX */}
+      <AnimatePresence>
+        {sandboxOpen && <FlashLoanSandbox onClose={() => setSandboxOpen(false)} />}
       </AnimatePresence>
     </main>
   );

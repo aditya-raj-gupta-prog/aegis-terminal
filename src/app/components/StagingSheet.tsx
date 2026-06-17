@@ -44,7 +44,7 @@ export default function StagingSheet({
 
   return (
     <motion.div
-      className="absolute inset-0 z-30 flex justify-end"
+      className="fixed inset-0 z-[90] flex justify-end"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}

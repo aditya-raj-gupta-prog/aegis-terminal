@@ -8,6 +8,7 @@ const HINTS = [
   { cmd: '/supply 10', desc: 'Stage a supply transaction' },
   { cmd: '/scan 0x...', desc: 'Run a contract security scan' },
   { cmd: '/gas-priority', desc: 'Fetch live gas + priority fee' },
+  { cmd: '/split', desc: 'Toggle split-pane tiling' },
   { cmd: '/status', desc: 'Report core engine vitals' },
   { cmd: '/clear', desc: 'Wipe the terminal buffer' },
 ];

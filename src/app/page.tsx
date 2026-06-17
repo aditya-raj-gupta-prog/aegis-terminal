@@ -10,8 +10,10 @@ import NetworkSwitcher from './components/NetworkSwitcher';
 import GasTicker from './components/GasTicker';
 import {
   ShieldCheck, Activity, Zap, RotateCcw, Wallet, Terminal,
-  Coins, Lock, Unlock, Mic, MicOff, Command as CommandIcon
+  Coins, Lock, Unlock, Mic, MicOff, Command as CommandIcon,
+  Volume2, VolumeX, Columns2, LayoutGrid
 } from 'lucide-react';
+import { useAudioTelemetry } from '@/lib/useAudioTelemetry';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber, useChainId } from 'wagmi';
 import { sepolia } from 'wagmi/chains';
@@ -91,10 +93,15 @@ export default function Home() {
   // Global command palette (Ctrl/Cmd+K) and the pre-execution staging sheet.
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [staging, setStaging] = useState<{ kind: 'supply' | 'earn'; amount: string; gas: string; slippage: string } | null>(null);
+  // Split-pane tiling toggle (Alt+S or `/split`): graph + terminal side by side.
+  const [splitView, setSplitView] = useState(false);
   const lastFetchTime = useRef(0);
   const logContainerRef = useRef<HTMLDivElement>(null);
   // Holds pending tx-simulation timers so they can be cleared on unmount.
   const simTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  // --- AUDIO TELEMETRY ---
+  const { click: playClick, warn: playWarn, muted: soundMuted, toggleMuted: toggleSound } = useAudioTelemetry();
 
   // --- WAGMI ---
   const { address: userAddress, isConnected } = useAccount();
@@ -173,6 +180,11 @@ export default function Home() {
     const [cmd, ...rest] = input.split(/\s+/);
     const lower = cmd.toLowerCase();
 
+    // Audio feedback: a crisp click for recognized commands, a warning drone for
+    // anything unrecognized.
+    const KNOWN = ['help', 'clear', 'check-gas', 'gas-priority', 'scan', 'supply', 'status', 'split'];
+    if (KNOWN.includes(lower)) playClick(); else playWarn();
+
     // `clear` wipes the buffer outright — no command echo to keep the wipe clean.
     if (lower === 'clear') {
       setLogs([]);
@@ -193,6 +205,7 @@ export default function Home() {
           "  scan [address]  run a Web3 security analysis on an address",
           "  supply [amount] open the pre-flight staging sheet",
           "  status          report core engine vitals",
+          "  split           toggle split-pane tiling (graph + logs)",
         ]);
         break;
       case 'check-gas':
@@ -230,6 +243,10 @@ export default function Home() {
           `[SYS] Chain: Sepolia | Block: ${blockNumber ? blockNumber.toString() : 'syncing'}`,
           `[SYS] Yield Engine: Live @ ${apy}% APY`,
         ]);
+        break;
+      case 'split':
+        setSplitView(v => !v);
+        addLog("[SYS] Split-pane tiling toggled.");
         break;
       default:
         addLog("Command not recognized. Type 'help' for options.");
@@ -277,23 +294,32 @@ export default function Home() {
   useEffect(() => () => { simTimers.current.forEach(clearTimeout); }, []);
 
   // Pre-execution staging: open the safety sheet, then run the sim on confirm.
-  const openStaging = (kind: 'supply' | 'earn') => setStaging({ kind, amount, ...mockPreflight() });
+  const openStaging = (kind: 'supply' | 'earn') => {
+    playClick();
+    setStaging({ kind, amount, ...mockPreflight() });
+  };
   const confirmStaging = () => {
     if (staging) runTxSimulation(staging.kind);
     setStaging(null);
   };
 
-  // --- COMMAND PALETTE (Ctrl/Cmd + K) ---
+  // --- GLOBAL SHORTCUTS ---
+  // Ctrl/Cmd+K toggles the command palette; Alt+S toggles split-pane tiling.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
+        playClick();
         setPaletteOpen(o => !o);
+      } else if (e.altKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        playClick();
+        setSplitView(v => !v);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [playClick]);
 
   const formatHealth = (val: bigint) => {
     if (!val) return "---";
@@ -306,6 +332,19 @@ export default function Home() {
 
   // Risk hierarchy derived from the health factor, shared by the gauge + card chrome.
   const risk = getRisk(healthToValue(healthFactor));
+
+  // Audio warning when the health factor drops meaningfully or crosses into the
+  // critical band. Tracks the previous numeric value via a ref.
+  const prevHealthRef = useRef<number | null>(null);
+  useEffect(() => {
+    const v = healthToValue(healthFactor);
+    const prev = prevHealthRef.current;
+    prevHealthRef.current = v;
+    if (prev === null) return; // first reading establishes the baseline
+    const dropped = v < prev - 0.05;
+    const enteredCritical = v < 1.1 && prev >= 1.1;
+    if (dropped || enteredCritical) playWarn();
+  }, [healthFactor, playWarn]);
 
   // Keep a ref mirror of the latest APY so async callbacks (AI strategy, voice)
   // read the current value without needing apy in their dependency arrays.
@@ -613,6 +652,56 @@ export default function Home() {
 
   if (!mounted) return null;
 
+  // --- EXTRACTED DIAGNOSTIC MODULES ---
+  // Shared between the bento grid and the split-pane layout so there's a single
+  // source of truth for each panel's content.
+  const yieldContent = (
+    <>
+      <div className="flex justify-between items-end mb-6">
+        <div>
+          <h2 className="text-slate-500 text-[10px] uppercase tracking-[0.3em] mb-1">Live Yield Metric</h2>
+          <div className="flex items-center gap-3">
+            <span className="text-6xl font-black text-white tracking-tighter tabular-nums text-glow-cyan">{displayApy}%</span>
+            <span className="text-cyan-300 text-xs font-bold bg-cyan-900/30 px-2 py-1 rounded border border-cyan-500/20">APY</span>
+          </div>
+        </div>
+        <div className="text-right">
+          <h3 className="text-slate-500 text-[10px] uppercase tracking-widest mb-1">Projected Growth</h3>
+          <span className="text-2xl font-bold text-cyan-400 tabular-nums">+{(parseFloat(displayApy)/12).toFixed(2)}% <span className="text-xs text-slate-500">/mo</span></span>
+        </div>
+      </div>
+      <div className="w-full flex-1 min-h-[12rem]">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={chartData}>
+            <YAxis hide domain={[minY, maxY]} allowDecimals />
+            <Tooltip content={<CustomTooltip />} />
+            <Area type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={3} fill="#22d3ee" fillOpacity={0.1} isAnimationActive={false} />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+    </>
+  );
+
+  const terminalContent = (
+    <>
+      <div className="absolute top-2 right-4 text-[9px] text-slate-600 uppercase tracking-widest flex items-center gap-1"><Terminal size={10} /> Neural Logs</div>
+      <div className="flex-1 overflow-y-auto space-y-1 pr-2 scrollbar-hide" ref={logContainerRef}>{logs.map((log, i) => <LogLine key={i} text={log} />)}</div>
+      <div className="mt-2 pt-2 border-t border-white/10 text-cyan-300/70 italic text-[10px] truncate">{advice}</div>
+      <form onSubmit={handleCommandSubmit} className="mt-1 flex items-center text-cyan-300">
+        <span className="text-cyan-600 mr-2 shrink-0">root@aegis:~$</span>
+        <input
+          type="text"
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          spellCheck={false}
+          autoComplete="off"
+          placeholder="type 'help' or press ⌘K"
+          className="flex-1 bg-transparent border-none outline-none text-cyan-200 placeholder:text-slate-700 font-mono caret-cyan-400"
+        />
+      </form>
+    </>
+  );
+
   return (
     <main className="relative min-h-screen bg-transparent text-slate-200 font-mono selection:bg-cyan-500/30 overflow-hidden">
       {/* Ambient 3D topographic-mesh layer floating in the absolute background */}
@@ -636,6 +725,20 @@ export default function Home() {
             <CommandIcon size={12} /> <span className="tracking-widest uppercase">Command</span>
             <kbd className="text-[9px] text-slate-500 border border-white/10 rounded px-1">⌘K</kbd>
           </button>
+          <button
+            onClick={() => { playClick(); setSplitView(v => !v); }}
+            className={`p-2 rounded-lg border transition-colors ${splitView ? 'text-cyan-300 border-cyan-500/40 bg-cyan-500/10' : 'text-slate-400 border-white/10 hover:text-white hover:border-white/20'}`}
+            title="Toggle split-pane tiling (Alt+S)"
+          >
+            {splitView ? <Columns2 size={14} /> : <LayoutGrid size={14} />}
+          </button>
+          <button
+            onClick={toggleSound}
+            className={`p-2 rounded-lg border transition-colors ${soundMuted ? 'text-slate-500 border-white/10 hover:text-white' : 'text-cyan-300 border-cyan-500/40 bg-cyan-500/10'}`}
+            title={soundMuted ? 'Unmute interface sounds' : 'Mute interface sounds'}
+          >
+            {soundMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+          </button>
           <NetworkSwitcher />
           {userAddress && (
             <div className="hidden sm:flex flex-col items-end leading-tight">
@@ -654,143 +757,132 @@ export default function Home() {
       {/* LIVE GAS FEE TICKER (chain-aware; remounts on network switch) */}
       <GasTicker key={chainId} chainId={chainId} />
 
-      {/* TACTICAL BENTO GRID */}
-      <motion.div
-        variants={gridContainer}
-        initial="hidden"
-        animate="show"
-        className="relative z-10 p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 auto-rows-min gap-5"
-      >
-        {/* YIELD METRIC */}
-        <motion.div variants={panelVariant} className={`lg:col-span-8 ${GLASS} p-6 relative overflow-hidden`}>
-            <div className="flex justify-between items-end mb-6">
-                <div>
-                    <h2 className="text-slate-500 text-[10px] uppercase tracking-[0.3em] mb-1">Live Yield Metric</h2>
-                    <div className="flex items-center gap-3">
-                        <span className="text-6xl font-black text-white tracking-tighter tabular-nums text-glow-cyan">{displayApy}%</span>
-                        <span className="text-cyan-300 text-xs font-bold bg-cyan-900/30 px-2 py-1 rounded border border-cyan-500/20">APY</span>
+      {/* MAIN WORKSPACE — bento grid OR split-pane tiling (Alt+S / `/split`) */}
+      <AnimatePresence mode="wait">
+        {splitView ? (
+          <motion.div
+            key="split"
+            initial={{ opacity: 0, scale: 0.99 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.99 }}
+            transition={SPRING}
+            className="relative z-10 p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-5 lg:h-[calc(100vh-9rem)]"
+          >
+            {/* GRAPH PANE */}
+            <motion.div layout className={`${GLASS} p-6 relative overflow-hidden flex flex-col min-h-[20rem] lg:h-full`}>
+                {yieldContent}
+            </motion.div>
+            {/* TERMINAL PANE */}
+            <motion.div layout className={`${GLASS} bg-black/60 p-4 font-mono text-xs flex flex-col relative overflow-hidden min-h-[20rem] lg:h-full`}>
+                {terminalContent}
+            </motion.div>
+          </motion.div>
+        ) : (
+          <motion.div
+            key="bento"
+            variants={gridContainer}
+            initial="hidden"
+            animate="show"
+            exit={{ opacity: 0 }}
+            className="relative z-10 p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 auto-rows-min gap-5"
+          >
+            {/* YIELD METRIC */}
+            <motion.div variants={panelVariant} className={`lg:col-span-8 ${GLASS} p-6 relative overflow-hidden flex flex-col`}>
+                {yieldContent}
+            </motion.div>
+
+            {/* RISK SENTINEL — RADIAL GAUGE */}
+            <motion.div
+              variants={panelVariant}
+              className={`lg:col-span-4 lg:row-span-2 ${GLASS} p-6 relative overflow-hidden flex flex-col ${risk.critical ? 'animate-strobe-crimson' : ''}`}
+              style={!risk.critical ? { borderColor: `${risk.color}40` } : undefined}
+            >
+                <div className="flex items-center justify-between mb-4">
+                    <span className="text-[10px] text-slate-500 tracking-[0.3em] uppercase font-bold flex items-center gap-2"><Activity size={10} /> Risk Sentinel</span>
+                    <span className="text-[9px] uppercase tracking-widest px-2 py-0.5 rounded-full border" style={{ color: risk.color, borderColor: `${risk.color}55` }}>{risk.label}</span>
+                </div>
+
+                <div className="flex-1 flex flex-col items-center justify-center">
+                    <HealthRadial factor={healthFactor} />
+                    <span className="text-[10px] text-slate-500 uppercase tracking-widest mt-3">Liquidation Health Factor</span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 mt-6">
+                    <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Collateral</span><span className="text-sm font-mono text-white tabular-nums">${totalCollateralUSD}</span></div>
+                    <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Debt</span><span className="text-sm font-mono text-red-300 tabular-nums">${totalDebtUSD}</span></div>
+                    <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Power</span><span className="text-sm font-mono text-cyan-300 tabular-nums">${borrowPowerUSD}</span></div>
+                </div>
+            </motion.div>
+
+            {/* TERMINAL */}
+            <motion.div variants={panelVariant} className={`lg:col-span-4 h-72 ${GLASS} bg-black/60 p-4 font-mono text-xs flex flex-col relative overflow-hidden`}>
+                {terminalContent}
+            </motion.div>
+
+            {/* EXECUTION ENGINE */}
+            <motion.div variants={panelVariant} className={`lg:col-span-4 h-72 ${GLASS} p-6 flex flex-col relative overflow-hidden`}>
+                <div className="flex p-1 bg-black/60 rounded-xl mb-5 border border-white/10">
+                    <button onClick={() => setMode('EARN')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'EARN' ? 'bg-cyan-500 text-slate-950' : 'text-slate-500 hover:text-white'}`}>🛡️ Earn (ETH)</button>
+                    <button onClick={() => setMode('LEVERAGE')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'LEVERAGE' ? 'bg-purple-600 text-white' : 'text-slate-500 hover:text-white'}`}>⚔️ Leverage (USDC)</button>
+                </div>
+
+                <h3 className="text-[10px] text-slate-500 uppercase tracking-[0.3em] mb-3 font-bold">
+                    {mode === 'EARN' ? 'Collateral Management' : 'Debt Acquisition'}
+                </h3>
+
+                <div className="relative mb-4">
+                    <input
+                      type="number"
+                      placeholder="0.00"
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                      className="w-full bg-black/60 border border-white/10 rounded-xl py-4 pl-4 pr-16 text-2xl font-mono text-white focus:outline-none focus:border-cyan-500 transition-colors tabular-nums"
+                    />
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                      <button
+                        onClick={startVoiceCommand}
+                        className={`p-2 rounded-lg transition-all active:scale-90 ${isListening ? 'text-red-500 bg-red-900/20 animate-pulse' : 'text-cyan-400 hover:bg-white/5'}`}
+                        title="Activate Neural Link"
+                      >
+                        {isListening ? <MicOff size={20} /> : <Mic size={20} />}
+                      </button>
                     </div>
                 </div>
-                <div className="text-right">
-                     <h3 className="text-slate-500 text-[10px] uppercase tracking-widest mb-1">Projected Growth</h3>
-                     <span className="text-2xl font-bold text-cyan-400 tabular-nums">+{(parseFloat(displayApy)/12).toFixed(2)}% <span className="text-xs text-slate-500">/mo</span></span>
+
+                <div className="grid grid-cols-2 gap-4 mt-auto">
+                    <button onClick={() => mode === 'EARN' ? openStaging('supply') : handleExecute('PRIMARY')} disabled={isPending || isConfirming || isSimulating} className={`py-4 rounded-xl font-black tracking-widest uppercase text-xs shadow-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50 ${mode === 'EARN' ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-cyan-900/30' : 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-900/30'}`}>
+                       {(isPending || isSimulating) ? <Activity className="animate-spin" size={16}/> : mode === 'EARN' ? <Zap size={16}/> : <Coins size={16}/>}
+                       {mode === 'EARN' ? 'Supply' : 'Borrow'}
+                    </button>
+
+                    <button onClick={() => handleExecute('SECONDARY')} disabled={isPending || isConfirming} className="border border-white/10 text-slate-400 hover:text-white hover:border-white/20 hover:bg-white/5 py-4 rounded-xl font-bold tracking-widest uppercase text-xs flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50">
+                        {mode === 'EARN' ? <RotateCcw size={16}/> : needsApproval ? <Lock size={16}/> : <Unlock size={16}/>}
+                        {mode === 'EARN' ? 'Recall' : needsApproval ? 'Unlock USDC' : 'Repay Debt'}
+                    </button>
                 </div>
-            </div>
-            <div className="h-48 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={chartData}>
-                        <YAxis hide domain={[minY, maxY]} allowDecimals />
-                        <Tooltip content={<CustomTooltip />} />
-                        <Area type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={3} fill="#22d3ee" fillOpacity={0.1} isAnimationActive={false} />
-                    </AreaChart>
-                </ResponsiveContainer>
-            </div>
-        </motion.div>
-
-        {/* RISK SENTINEL — RADIAL GAUGE */}
-        <motion.div
-          variants={panelVariant}
-          className={`lg:col-span-4 lg:row-span-2 ${GLASS} p-6 relative overflow-hidden flex flex-col ${risk.critical ? 'animate-strobe-crimson' : ''}`}
-          style={!risk.critical ? { borderColor: `${risk.color}40` } : undefined}
-        >
-            <div className="flex items-center justify-between mb-4">
-                <span className="text-[10px] text-slate-500 tracking-[0.3em] uppercase font-bold flex items-center gap-2"><Activity size={10} /> Risk Sentinel</span>
-                <span className="text-[9px] uppercase tracking-widest px-2 py-0.5 rounded-full border" style={{ color: risk.color, borderColor: `${risk.color}55` }}>{risk.label}</span>
-            </div>
-
-            <div className="flex-1 flex flex-col items-center justify-center">
-                <HealthRadial factor={healthFactor} />
-                <span className="text-[10px] text-slate-500 uppercase tracking-widest mt-3">Liquidation Health Factor</span>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2 mt-6">
-                <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Collateral</span><span className="text-sm font-mono text-white tabular-nums">${totalCollateralUSD}</span></div>
-                <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Debt</span><span className="text-sm font-mono text-red-300 tabular-nums">${totalDebtUSD}</span></div>
-                <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Power</span><span className="text-sm font-mono text-cyan-300 tabular-nums">${borrowPowerUSD}</span></div>
-            </div>
-        </motion.div>
-
-        {/* TERMINAL */}
-        <motion.div variants={panelVariant} className={`lg:col-span-4 h-72 ${GLASS} bg-black/60 p-4 font-mono text-xs flex flex-col relative overflow-hidden`}>
-             <div className="absolute top-2 right-4 text-[9px] text-slate-600 uppercase tracking-widest flex items-center gap-1"><Terminal size={10} /> Neural Logs</div>
-             <div className="flex-1 overflow-y-auto space-y-1 pr-2 scrollbar-hide" ref={logContainerRef}>{logs.map((log, i) => <LogLine key={i} text={log} />)}</div>
-             <div className="mt-2 pt-2 border-t border-white/10 text-cyan-300/70 italic text-[10px] truncate">{advice}</div>
-             <form onSubmit={handleCommandSubmit} className="mt-1 flex items-center text-cyan-300">
-                <span className="text-cyan-600 mr-2 shrink-0">root@aegis:~$</span>
-                <input
-                  type="text"
-                  value={command}
-                  onChange={(e) => setCommand(e.target.value)}
-                  spellCheck={false}
-                  autoComplete="off"
-                  placeholder="type 'help' or press ⌘K"
-                  className="flex-1 bg-transparent border-none outline-none text-cyan-200 placeholder:text-slate-700 font-mono caret-cyan-400"
-                />
-             </form>
-        </motion.div>
-
-        {/* EXECUTION ENGINE */}
-        <motion.div variants={panelVariant} className={`lg:col-span-4 h-72 ${GLASS} p-6 flex flex-col relative overflow-hidden`}>
-            <div className="flex p-1 bg-black/60 rounded-xl mb-5 border border-white/10">
-                <button onClick={() => setMode('EARN')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'EARN' ? 'bg-cyan-500 text-slate-950' : 'text-slate-500 hover:text-white'}`}>🛡️ Earn (ETH)</button>
-                <button onClick={() => setMode('LEVERAGE')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'LEVERAGE' ? 'bg-purple-600 text-white' : 'text-slate-500 hover:text-white'}`}>⚔️ Leverage (USDC)</button>
-            </div>
-
-            <h3 className="text-[10px] text-slate-500 uppercase tracking-[0.3em] mb-3 font-bold">
-                {mode === 'EARN' ? 'Collateral Management' : 'Debt Acquisition'}
-            </h3>
-
-            <div className="relative mb-4">
-                <input
-                  type="number"
-                  placeholder="0.00"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  className="w-full bg-black/60 border border-white/10 rounded-xl py-4 pl-4 pr-16 text-2xl font-mono text-white focus:outline-none focus:border-cyan-500 transition-colors tabular-nums"
-                />
-                <div className="absolute right-2 top-1/2 -translate-y-1/2">
-                  <button
-                    onClick={startVoiceCommand}
-                    className={`p-2 rounded-lg transition-all active:scale-90 ${isListening ? 'text-red-500 bg-red-900/20 animate-pulse' : 'text-cyan-400 hover:bg-white/5'}`}
-                    title="Activate Neural Link"
-                  >
-                    {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-                  </button>
-                </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4 mt-auto">
-                <button onClick={() => mode === 'EARN' ? openStaging('supply') : handleExecute('PRIMARY')} disabled={isPending || isConfirming || isSimulating} className={`py-4 rounded-xl font-black tracking-widest uppercase text-xs shadow-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50 ${mode === 'EARN' ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-cyan-900/30' : 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-900/30'}`}>
-                   {(isPending || isSimulating) ? <Activity className="animate-spin" size={16}/> : mode === 'EARN' ? <Zap size={16}/> : <Coins size={16}/>}
-                   {mode === 'EARN' ? 'Supply' : 'Borrow'}
-                </button>
-
-                <button onClick={() => handleExecute('SECONDARY')} disabled={isPending || isConfirming} className="border border-white/10 text-slate-400 hover:text-white hover:border-white/20 hover:bg-white/5 py-4 rounded-xl font-bold tracking-widest uppercase text-xs flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50">
-                    {mode === 'EARN' ? <RotateCcw size={16}/> : needsApproval ? <Lock size={16}/> : <Unlock size={16}/>}
-                    {mode === 'EARN' ? 'Recall' : needsApproval ? 'Unlock USDC' : 'Repay Debt'}
-                </button>
-            </div>
-
-            {/* Pre-Execution Staging Overlay (Shadow Simulation Sheet) */}
-            <AnimatePresence>
-              {staging && (
-                <StagingSheet
-                  kind={staging.kind}
-                  amount={staging.amount}
-                  gas={staging.gas}
-                  slippage={staging.slippage}
-                  onConfirm={confirmStaging}
-                  onCancel={() => setStaging(null)}
-                />
-              )}
-            </AnimatePresence>
-        </motion.div>
-      </motion.div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* GLOBAL COMMAND PALETTE */}
       <AnimatePresence>
         {paletteOpen && (
           <CommandPalette onRun={processCommand} onClose={() => setPaletteOpen(false)} />
+        )}
+      </AnimatePresence>
+
+      {/* PRE-EXECUTION STAGING SHEET (viewport overlay — available in any layout) */}
+      <AnimatePresence>
+        {staging && (
+          <StagingSheet
+            kind={staging.kind}
+            amount={staging.amount}
+            gas={staging.gas}
+            slippage={staging.slippage}
+            onConfirm={confirmStaging}
+            onCancel={() => setStaging(null)}
+          />
         )}
       </AnimatePresence>
     </main>

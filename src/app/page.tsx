@@ -339,16 +339,13 @@ export default function Home() {
   // active wallet balance over time so each on-chain change pushes a new,
   // distinct coordinate — giving the line real dips/spikes instead of a flat,
   // statically-seeded projection curve.
-  // Seed with a couple of slightly different mock baseline points around the
-  // current balance so the line is immediately visible on first paint and the
-  // axis establishes an active (non-collapsed) grid before live data arrives.
-  const [chartData, setChartData] = useState<{ name: string; value: number }[]>([
-    { name: 'baseline-1', value: 0.0499 },
-    { name: 'baseline-2', value: 0.0498 },
-  ]);
+  // Starts completely empty so a new user begins with a fresh grid rather than
+  // any hardcoded testnet baseline; the first live balance reading seeds it.
+  const [chartData, setChartData] = useState<{ name: string; value: number }[]>([]);
 
-  // Listen to the live balance coming from our wallet hook. Whenever it actually
-  // moves (e.g. 0.0498 -> 0.0497 after a SepoliaETH tx), append the new value.
+  // Listen to the live balance coming from our wallet hook. The first reading
+  // seeds the series as the baseline coordinate; afterwards, whenever the balance
+  // actually moves (e.g. 0.0498 -> 0.0497 after a SepoliaETH tx), append it.
   useEffect(() => {
     // Prefer the native ETH balance; fall back to the staked aToken balance.
     const active = liveEthBalance > 0 ? liveEthBalance : rawABalance;
@@ -356,6 +353,9 @@ export default function Home() {
 
     const point = parseFloat(active.toFixed(6));
     setChartData(prev => {
+      // Empty series: seed with the current balance as the single baseline point.
+      if (prev.length === 0) return [{ name: new Date().toLocaleTimeString(), value: point }];
+
       const last = prev[prev.length - 1];
       // Skip if the balance hasn't moved — avoids piling up identical points.
       if (last && last.value === point) return prev;

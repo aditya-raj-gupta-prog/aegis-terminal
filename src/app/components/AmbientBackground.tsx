@@ -1,74 +1,74 @@
 'use client';
 
-import { useRef, useMemo } from 'react';
+import { useRef, useMemo, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 
-// Slowly rotating point-cloud "particle matrix" with a faint wireframe grid,
-// rendered in the absolute background of the terminal.
-function ParticleMatrix() {
-  const pointsRef = useRef<THREE.Points>(null);
+// Rotating, rippling wireframe topography. The peaks/valleys of the lattice are
+// driven by layered sine waves over time to mimic market volatility and the
+// depth of liquidity pools. A global pointer listener adds subtle parallax so
+// the scene feels interactive without intercepting clicks on the HUD above it.
+function TopoMesh() {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const geomRef = useRef<THREE.PlaneGeometry>(null);
+  const pointer = useRef({ x: 0, y: 0 });
 
-  // Generate a stable cloud of particles inside a sphere shell.
-  const positions = useMemo(() => {
-    const count = 1400;
-    const arr = new Float32Array(count * 3);
-    for (let i = 0; i < count; i++) {
-      const r = 6 + Math.random() * 6;
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.acos(2 * Math.random() - 1);
-      arr[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-      arr[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-      arr[i * 3 + 2] = r * Math.cos(phi);
-    }
+  const SEG = 96;
+  const SIZE = 60;
+
+  // Snapshot the flat base grid once so each frame's displacement is computed
+  // from the original lattice rather than accumulating drift.
+  const base = useMemo(() => {
+    const g = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
+    const arr = Float32Array.from(g.attributes.position.array as Float32Array);
+    g.dispose();
     return arr;
   }, []);
 
-  useFrame((_, delta) => {
-    if (pointsRef.current) {
-      pointsRef.current.rotation.y += delta * 0.04;
-      pointsRef.current.rotation.x += delta * 0.012;
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      pointer.current.x = (e.clientX / window.innerWidth) * 2 - 1;
+      pointer.current.y = (e.clientY / window.innerHeight) * 2 - 1;
+    };
+    window.addEventListener('pointermove', onMove);
+    return () => window.removeEventListener('pointermove', onMove);
+  }, []);
+
+  useFrame((state) => {
+    const geom = geomRef.current;
+    const mesh = meshRef.current;
+    if (!geom || !mesh) return;
+
+    const t = state.clock.elapsedTime;
+    const pos = geom.attributes.position.array as Float32Array;
+    for (let i = 0; i < pos.length; i += 3) {
+      const x = base[i];
+      const y = base[i + 1];
+      pos[i + 2] =
+        Math.sin(x * 0.25 + t * 0.7) * 1.6 +
+        Math.cos(y * 0.3 + t * 0.5) * 1.2 +
+        Math.sin((x + y) * 0.15 + t * 0.9) * 0.8;
     }
+    geom.attributes.position.needsUpdate = true;
+
+    // Slow continuous spin + eased pointer parallax.
+    mesh.rotation.z += 0.0006;
+    mesh.rotation.x = THREE.MathUtils.lerp(mesh.rotation.x, -Math.PI / 2.3 + pointer.current.y * 0.12, 0.04);
+    mesh.rotation.y = THREE.MathUtils.lerp(mesh.rotation.y, pointer.current.x * 0.12, 0.04);
   });
 
   return (
-    <points ref={pointsRef}>
-      <bufferGeometry>
-        <bufferAttribute
-          attach="attributes-position"
-          args={[positions, 3]}
-        />
-      </bufferGeometry>
-      <pointsMaterial
-        size={0.045}
-        color="#3b82f6"
+    <mesh ref={meshRef} rotation={[-Math.PI / 2.3, 0, 0]} position={[0, -6, 0]}>
+      <planeGeometry ref={geomRef} args={[SIZE, SIZE, SEG, SEG]} />
+      <meshBasicMaterial
+        color="#0e9bb8"
+        wireframe
         transparent
-        opacity={0.55}
-        sizeAttenuation
-        depthWrite={false}
+        opacity={0.32}
         blending={THREE.AdditiveBlending}
+        depthWrite={false}
       />
-    </points>
-  );
-}
-
-function WireGrid() {
-  const gridRef = useRef<THREE.GridHelper>(null);
-
-  useFrame((_, delta) => {
-    if (gridRef.current) {
-      gridRef.current.rotation.z += delta * 0.01;
-    }
-  });
-
-  // GridHelper drawn far below and tilted, giving a faint glowing floor grid.
-  return (
-    <gridHelper
-      ref={gridRef}
-      args={[60, 60, '#0e7490', '#082f49']}
-      position={[0, -8, 0]}
-      rotation={[Math.PI / 2.2, 0, 0]}
-    />
+    </mesh>
   );
 }
 
@@ -78,14 +78,13 @@ export default function AmbientBackground() {
       <Canvas
         gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}
         dpr={[1, 1.5]}
-        camera={{ position: [0, 0, 16], fov: 60 }}
+        camera={{ position: [0, 7, 18], fov: 60 }}
         frameloop="always"
       >
         <ambientLight intensity={0.4} />
         <pointLight position={[10, 10, 10]} intensity={0.6} color="#22d3ee" />
-        <ParticleMatrix />
-        <WireGrid />
-        <fog attach="fog" args={['#050505', 14, 30]} />
+        <TopoMesh />
+        <fog attach="fog" args={['#050505', 18, 44]} />
       </Canvas>
     </div>
   );

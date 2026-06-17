@@ -1,21 +1,24 @@
 'use client';
 import { useEffect, useState, useRef, useMemo, type FormEvent } from 'react';
 import { startYieldListener } from '@/lib/yieldListener';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import AmbientBackground from './components/AmbientBackground';
-import { 
-  ShieldCheck, Activity, Zap, ExternalLink, 
-  RotateCcw, Wallet, Terminal, Coins, ArrowRightLeft, Lock, Unlock, Mic, MicOff
+import HealthRadial, { getRisk, healthToValue } from './components/HealthRadial';
+import CommandPalette from './components/CommandPalette';
+import StagingSheet from './components/StagingSheet';
+import {
+  ShieldCheck, Activity, Zap, RotateCcw, Wallet, Terminal,
+  Coins, Lock, Unlock, Mic, MicOff, Command as CommandIcon
 } from 'lucide-react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber } from 'wagmi';
 import { sepolia } from 'wagmi/chains';
 import { parseEther, formatEther, parseUnits } from 'viem';
 import { AreaChart, Area, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { 
-  WRAPPED_TOKEN_GATEWAY_ADDRESS, 
-  GATEWAY_ABI, 
-  ADDRESS_PROVIDER_ADDRESS, 
+import {
+  WRAPPED_TOKEN_GATEWAY_ADDRESS,
+  GATEWAY_ABI,
+  ADDRESS_PROVIDER_ADDRESS,
   PROVIDER_ABI,
   A_WETH_ADDRESS,
   USDC_ASSET_ADDRESS,
@@ -25,6 +28,9 @@ import {
 
 const FALLBACK_POOL_ADDRESS = "0x6Ae43d534944d6df31b761937f20C10B59aF4933";
 
+// Shared glassmorphic bento-card chrome.
+const GLASS = "backdrop-blur-md bg-slate-950/40 border border-white/10 rounded-3xl";
+
 // Snappy spring used for the staggered panel entry animations.
 const SPRING = { type: "spring" as const, stiffness: 180, damping: 22 };
 
@@ -32,7 +38,7 @@ const SPRING = { type: "spring" as const, stiffness: 180, damping: 22 };
 const gridContainer = {
   hidden: {},
   show: {
-    transition: { staggerChildren: 0.12, delayChildren: 0.1 },
+    transition: { staggerChildren: 0.1, delayChildren: 0.08 },
   },
 };
 
@@ -47,42 +53,22 @@ const LogLine = ({ text }: { text: string }) => (
     initial={{ opacity: 0, x: -10 }}
     animate={{ opacity: 1, x: 0 }}
     transition={{ type: "spring", stiffness: 180, damping: 22 }}
-    className="text-[10px] font-mono text-green-400/80 mb-1 border-l-2 border-green-500/30 pl-2"
+    className="text-[10px] font-mono text-cyan-300/80 mb-1 border-l-2 border-cyan-500/30 pl-2"
   >
     <span className="opacity-50 mr-2">[{new Date().toLocaleTimeString()}]</span>
     {text}
   </motion.div>
 );
 
-const CustomTooltip = ({ active, payload }: any) => {
+const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: { value: number }[] }) => {
   if (active && payload && payload.length) {
     return (
-      <div className="bg-black/90 border border-slate-700 p-2 rounded shadow-xl backdrop-blur-md">
-        <p className="text-green-400 font-mono font-bold text-xs">{payload[0].value} ETH</p>
+      <div className="bg-black/90 border border-white/10 p-2 rounded shadow-xl backdrop-blur-md">
+        <p className="text-cyan-300 font-mono font-bold text-xs">{payload[0].value} ETH</p>
       </div>
     );
   }
   return null;
-};
-
-// Heatmap Component
-const HealthBar = ({ factor }: { factor: string | number }) => {
-    const val = factor === 'SAFE' || factor === '---' ? 3.0 : Number(factor);
-    const percentage = Math.min((val / 3.0) * 100, 100);
-    
-    let colorClass = 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]';
-    if (val < 1.1) colorClass = 'bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.8)] animate-pulse';
-    else if (val < 1.5) colorClass = 'bg-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.5)]';
-
-    return (
-        <div className="w-full bg-slate-800/50 rounded-full h-1.5 mt-3 overflow-hidden border border-white/5">
-            <motion.div 
-                initial={{ width: 0 }}
-                animate={{ width: `${percentage}%` }}
-                className={`h-full transition-all duration-700 ${colorClass}`}
-            />
-        </div>
-    );
 };
 
 export default function Home() {
@@ -100,6 +86,9 @@ export default function Home() {
   // Interactive terminal: current command-line buffer + an in-flight tx-sim guard.
   const [command, setCommand] = useState("");
   const [isSimulating, setIsSimulating] = useState(false);
+  // Global command palette (Ctrl/Cmd+K) and the pre-execution staging sheet.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [staging, setStaging] = useState<{ kind: 'supply' | 'earn'; amount: string; gas: string; slippage: string } | null>(null);
   const lastFetchTime = useRef(0);
   const logContainerRef = useRef<HTMLDivElement>(null);
   // Holds pending tx-simulation timers so they can be cleared on unmount.
@@ -125,7 +114,7 @@ export default function Home() {
     abi: PROVIDER_ABI,
     functionName: 'getPool',
   });
-  
+
   const activePool = poolAddress || FALLBACK_POOL_ADDRESS;
 
   const { data: aBalanceData, refetch: refetchABalance } = useReadContract({
@@ -162,10 +151,19 @@ export default function Home() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [logs]);
 
+  // Mock pre-flight metrics. Called only from event handlers / the command
+  // processor (never during render), so Math.random is safe here.
+  const mockPreflight = () => ({
+    gas: (18 + Math.random() * 10).toFixed(1),
+    slippage: (0.05 + Math.random() * 0.25).toFixed(2),
+  });
+
   // --- INTERACTIVE TERMINAL ---
-  // Parse and dispatch a typed command against the local terminal engine.
+  // Parse and dispatch a typed command against the local terminal engine. Accepts
+  // both bare (`help`) and slash-prefixed (`/supply 10`) forms so the inline
+  // terminal and the global command palette share one processor.
   const processCommand = (raw: string) => {
-    const input = raw.trim();
+    const input = raw.trim().replace(/^\//, '');
     if (!input) return;
 
     const [cmd, ...rest] = input.split(/\s+/);
@@ -187,11 +185,14 @@ export default function Home() {
           "  help            list available terminal sub-commands",
           "  clear           wipe the log buffer",
           "  check-gas       fetch real-time network gas metrics",
+          "  gas-priority    alias for check-gas",
           "  scan [address]  run a Web3 security analysis on an address",
+          "  supply [amount] open the pre-flight staging sheet",
           "  status          report core engine vitals",
         ]);
         break;
-      case 'check-gas': {
+      case 'check-gas':
+      case 'gas-priority': {
         const base = (20 + Math.random() * 15).toFixed(1);
         const prio = (1 + Math.random() * 2).toFixed(1);
         addLog(`[SYS] Base Fee: ${base} Gwei | Priority: ${prio} Gwei`);
@@ -211,6 +212,12 @@ export default function Home() {
           "[SEC] Scanning for unlimited approvals... clean.",
           "[SEC] Risk Score: LOW. No critical vulnerabilities detected.",
         ]);
+        break;
+      }
+      case 'supply': {
+        const amt = rest[0] || amount;
+        addLog(`[TX] Staging supply pre-flight${amt ? ` for ${amt} ETH` : ''}...`);
+        setStaging({ kind: 'supply', amount: amt, ...mockPreflight() });
         break;
       }
       case 'status':
@@ -265,14 +272,36 @@ export default function Home() {
   // Clear any in-flight simulation timers if the component unmounts mid-sequence.
   useEffect(() => () => { simTimers.current.forEach(clearTimeout); }, []);
 
+  // Pre-execution staging: open the safety sheet, then run the sim on confirm.
+  const openStaging = (kind: 'supply' | 'earn') => setStaging({ kind, amount, ...mockPreflight() });
+  const confirmStaging = () => {
+    if (staging) runTxSimulation(staging.kind);
+    setStaging(null);
+  };
+
+  // --- COMMAND PALETTE (Ctrl/Cmd + K) ---
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen(o => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const formatHealth = (val: bigint) => {
     if (!val) return "---";
     const num = Number(val) / 1e18;
     return num > 100 ? "SAFE" : num.toFixed(2);
   };
-  const healthFactor = accountData ? formatHealth((accountData as any)[5]) : "---";
+  const healthFactor = accountData ? formatHealth((accountData as readonly bigint[])[5]) : "---";
   const healthRef = useRef(healthFactor);
   useEffect(() => { healthRef.current = healthFactor; }, [healthFactor]);
+
+  // Risk hierarchy derived from the health factor, shared by the gauge + card chrome.
+  const risk = getRisk(healthToValue(healthFactor));
 
   // Keep a ref mirror of the latest APY so async callbacks (AI strategy, voice)
   // read the current value without needing apy in their dependency arrays.
@@ -299,10 +328,10 @@ export default function Home() {
   }, []);
 
   const formatBase = (val: bigint) => val ? (Number(val) / 100000000).toFixed(2) : "0.00";
-  const totalCollateralUSD = accountData ? formatBase(accountData[0]) : "0.00";
-  const totalDebtUSD = accountData ? formatBase(accountData[1]) : "0.00";
-  const borrowPowerUSD = accountData ? formatBase(accountData[2]) : "0.00";
-  const rawABalance = aBalanceData ? parseFloat(formatEther(aBalanceData)) : 0;
+  const totalCollateralUSD = accountData ? formatBase((accountData as readonly bigint[])[0]) : "0.00";
+  const totalDebtUSD = accountData ? formatBase((accountData as readonly bigint[])[1]) : "0.00";
+  const borrowPowerUSD = accountData ? formatBase((accountData as readonly bigint[])[2]) : "0.00";
+  const rawABalance = aBalanceData ? parseFloat(formatEther(aBalanceData as bigint)) : 0;
   // Live native ETH balance, parsed into a number for the projection math.
   const liveEthBalance = ethBalance ? parseFloat(formatEther(ethBalance.value)) : 0;
 
@@ -378,10 +407,10 @@ export default function Home() {
       const res = await fetch('/api/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            yieldData: apy, 
+          body: JSON.stringify({
+            yieldData: apy,
             healthFactor: healthRef.current,
-            scenario: transcript 
+            scenario: transcript
           })
       });
       const data = await res.json();
@@ -389,18 +418,31 @@ export default function Home() {
         setAdvice(data.advice);
         addLog("Neural Simulation Complete.");
       }
-    } catch (err) {
+    } catch {
       addLog("Neural Link Sync Failed.");
     }
   };
 
   const startVoiceCommand = () => {
-    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    if (!SpeechRecognition) return alert("Browser does not support Speech Recognition");
+    // The Web Speech API isn't in the standard TS DOM lib, so type the slice we use.
+    type VoiceResult = { results: { [i: number]: { [j: number]: { transcript: string } } } };
+    interface VoiceRecognition {
+      onstart: () => void;
+      onresult: (event: VoiceResult) => void;
+      onerror: () => void;
+      onend: () => void;
+      start: () => void;
+    }
+    const w = window as unknown as {
+      webkitSpeechRecognition?: new () => VoiceRecognition;
+      SpeechRecognition?: new () => VoiceRecognition;
+    };
+    const Recognition = w.webkitSpeechRecognition || w.SpeechRecognition;
+    if (!Recognition) return alert("Browser does not support Speech Recognition");
 
-    const recognition = new SpeechRecognition();
+    const recognition = new Recognition();
     recognition.onstart = () => { setIsListening(true); addLog("Neural Link: LISTENING..."); };
-    recognition.onresult = (event: any) => { handleVoiceInput(event.results[0][0].transcript); };
+    recognition.onresult = (event) => { handleVoiceInput(event.results[0][0].transcript); };
     recognition.onerror = () => setIsListening(false);
     recognition.onend = () => setIsListening(false);
     recognition.start();
@@ -413,7 +455,7 @@ export default function Home() {
         const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
         const data = await res.json();
         addLog(`Oracle Connected: ETH = $${data.ethereum.usd}`);
-      } catch (err) { addLog("Oracle Connection Failed."); }
+      } catch { addLog("Oracle Connection Failed."); }
     };
     fetchPrice();
   }, []);
@@ -440,7 +482,7 @@ export default function Home() {
       }
     });
     return () => stopListener();
-  }, []); 
+  }, []);
 
   useEffect(() => {
     if (isConfirming) addLog("Broadcast: Confirming Transaction...");
@@ -460,12 +502,12 @@ export default function Home() {
 
     if (mode === 'EARN') {
         const val = parseEther(amount);
-        if (action === 'PRIMARY') { 
+        if (action === 'PRIMARY') {
             writeContract({
                 address: WRAPPED_TOKEN_GATEWAY_ADDRESS,
                 abi: GATEWAY_ABI,
                 functionName: 'depositETH',
-                args: [activePool, userAddress, 0], 
+                args: [activePool, userAddress, 0],
                 value: val,
             });
         } else {
@@ -473,17 +515,17 @@ export default function Home() {
                 address: WRAPPED_TOKEN_GATEWAY_ADDRESS,
                 abi: GATEWAY_ABI,
                 functionName: 'withdrawETH',
-                args: [activePool, val, userAddress], 
+                args: [activePool, val, userAddress],
             });
         }
     } else {
         const val = parseUnits(amount, 6);
         if (action === 'PRIMARY') {
             writeContract({
-                address: activePool, 
+                address: activePool,
                 abi: POOL_ABI,
                 functionName: 'borrow',
-                args: [USDC_ASSET_ADDRESS, val, BigInt(2), 0, userAddress], 
+                args: [USDC_ASSET_ADDRESS, val, BigInt(2), 0, userAddress],
             });
         } else {
             if (needsApproval) {
@@ -491,14 +533,14 @@ export default function Home() {
                     address: USDC_ASSET_ADDRESS,
                     abi: ERC20_ABI,
                     functionName: 'approve',
-                    args: [activePool, val], 
+                    args: [activePool, val],
                 });
             } else {
                 writeContract({
                     address: activePool,
                     abi: POOL_ABI,
                     functionName: 'repay',
-                    args: [USDC_ASSET_ADDRESS, val, BigInt(2), userAddress], 
+                    args: [USDC_ASSET_ADDRESS, val, BigInt(2), userAddress],
                 });
             }
         }
@@ -508,26 +550,34 @@ export default function Home() {
   if (!mounted) return null;
 
   return (
-    <main className="relative min-h-screen bg-transparent text-slate-200 font-mono selection:bg-blue-500/30 overflow-hidden">
-      {/* Ambient 3D particle-matrix layer floating in the absolute background */}
+    <main className="relative min-h-screen bg-transparent text-slate-200 font-mono selection:bg-cyan-500/30 overflow-hidden">
+      {/* Ambient 3D topographic-mesh layer floating in the absolute background */}
       <AmbientBackground />
 
-      <header className="h-16 border-b border-white/10 backdrop-blur-md flex justify-between items-center px-6 sticky top-0 z-50 bg-[#050505]/80">
+      <header className="h-16 border-b border-white/10 backdrop-blur-md flex justify-between items-center px-6 sticky top-0 z-50 bg-[#050505]/70">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center shadow-[0_0_15px_rgba(37,99,235,0.5)]">
-            <ShieldCheck className="text-white" size={18} />
+          <div className="w-8 h-8 bg-cyan-500 rounded flex items-center justify-center shadow-[0_0_15px_rgba(34,211,238,0.5)]">
+            <ShieldCheck className="text-slate-950" size={18} />
           </div>
-          <span className="text-xl font-black tracking-tighter uppercase italic bg-gradient-to-r from-blue-400 to-cyan-300 bg-clip-text text-transparent">
+          <span className="text-xl font-black tracking-tighter uppercase italic bg-gradient-to-r from-cyan-300 to-blue-400 bg-clip-text text-transparent">
             Aegis Command
           </span>
         </div>
         <div className="flex items-center gap-4">
+          <button
+            onClick={() => setPaletteOpen(true)}
+            className="hidden sm:flex items-center gap-2 text-[10px] text-slate-400 hover:text-white border border-white/10 hover:border-white/20 rounded-lg px-2.5 py-1.5 transition-colors"
+            title="Open command palette"
+          >
+            <CommandIcon size={12} /> <span className="tracking-widest uppercase">Command</span>
+            <kbd className="text-[9px] text-slate-500 border border-white/10 rounded px-1">⌘K</kbd>
+          </button>
           {userAddress && (
             <div className="hidden sm:flex flex-col items-end leading-tight">
               <span className="text-[10px] text-slate-500 uppercase tracking-widest flex items-center gap-1">
                 <Wallet size={10} /> {`${userAddress.slice(0, 6)}…${userAddress.slice(-4)}`}
               </span>
-              <span className="text-xs font-mono text-green-400">
+              <span className="text-xs font-mono text-cyan-300">
                 {liveEthBalance.toFixed(4)} {ethBalance?.symbol ?? 'ETH'}
               </span>
             </div>
@@ -536,126 +586,145 @@ export default function Home() {
         </div>
       </header>
 
+      {/* TACTICAL BENTO GRID */}
       <motion.div
         variants={gridContainer}
         initial="hidden"
         animate="show"
-        className="relative z-10 p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-4rem)]"
+        className="relative z-10 p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 auto-rows-min gap-5"
       >
-        {/* LEFT COLUMN */}
-        <motion.div variants={gridContainer} className="lg:col-span-7 flex flex-col gap-6">
-            <motion.div variants={panelVariant} className="flex-1 bg-slate-900/40 border border-slate-800 rounded-3xl p-6 relative overflow-hidden">
-                <div className="flex justify-between items-end mb-6">
-                    <div>
-                        <h2 className="text-slate-500 text-[10px] uppercase tracking-[0.3em] mb-1">Live Yield Metric</h2>
-                        <div className="flex items-center gap-3">
-                            <span className="text-6xl font-black text-white tracking-tighter">{apy}%</span>
-                            <span className="text-green-400 text-xs font-bold bg-green-900/30 px-2 py-1 rounded border border-green-500/20">APY</span>
-                        </div>
-                    </div>
-                    <div className="text-right">
-                         <h3 className="text-slate-500 text-[10px] uppercase tracking-widest mb-1">Projected Growth</h3>
-                         <span className="text-2xl font-bold text-blue-400">+{(parseFloat(apy)/12).toFixed(2)}% <span className="text-xs text-slate-500">/mo</span></span>
+        {/* YIELD METRIC */}
+        <motion.div variants={panelVariant} className={`lg:col-span-8 ${GLASS} p-6 relative overflow-hidden`}>
+            <div className="flex justify-between items-end mb-6">
+                <div>
+                    <h2 className="text-slate-500 text-[10px] uppercase tracking-[0.3em] mb-1">Live Yield Metric</h2>
+                    <div className="flex items-center gap-3">
+                        <span className="text-6xl font-black text-white tracking-tighter tabular-nums text-glow-cyan">{apy}%</span>
+                        <span className="text-cyan-300 text-xs font-bold bg-cyan-900/30 px-2 py-1 rounded border border-cyan-500/20">APY</span>
                     </div>
                 </div>
-                <div className="h-48 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={chartData}>
-                            <YAxis hide domain={[minY, maxY]} allowDecimals />
-                            <Tooltip content={<CustomTooltip />} />
-                            <Area type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={3} fill="#3b82f6" fillOpacity={0.1} isAnimationActive={false} />
-                        </AreaChart>
-                    </ResponsiveContainer>
+                <div className="text-right">
+                     <h3 className="text-slate-500 text-[10px] uppercase tracking-widest mb-1">Projected Growth</h3>
+                     <span className="text-2xl font-bold text-cyan-400 tabular-nums">+{(parseFloat(apy)/12).toFixed(2)}% <span className="text-xs text-slate-500">/mo</span></span>
                 </div>
-            </motion.div>
-
-            <motion.div variants={panelVariant} className="h-48 bg-black border border-slate-800 rounded-3xl p-4 font-mono text-xs flex flex-col relative overflow-hidden">
-                 <div className="absolute top-2 right-4 text-[9px] text-slate-600 uppercase tracking-widest flex items-center gap-1"><Terminal size={10} /> Neural Logs</div>
-                 <div className="flex-1 overflow-y-auto space-y-1 pr-2 scrollbar-hide" ref={logContainerRef}>{logs.map((log, i) => <LogLine key={i} text={log} />)}</div>
-                 <div className="mt-2 pt-2 border-t border-slate-800 text-blue-300 italic text-[10px] opacity-70 truncate">{advice}</div>
-                 <form onSubmit={handleCommandSubmit} className="mt-1 flex items-center text-blue-300">
-                    <span className="text-blue-600 mr-2 shrink-0">root@aegis:~$</span>
-                    <input
-                      type="text"
-                      value={command}
-                      onChange={(e) => setCommand(e.target.value)}
-                      spellCheck={false}
-                      autoComplete="off"
-                      placeholder="type 'help' for commands"
-                      className="flex-1 bg-transparent border-none outline-none text-blue-200 placeholder:text-slate-700 font-mono caret-blue-400"
-                    />
-                 </form>
-            </motion.div>
+            </div>
+            <div className="h-48 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={chartData}>
+                        <YAxis hide domain={[minY, maxY]} allowDecimals />
+                        <Tooltip content={<CustomTooltip />} />
+                        <Area type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={3} fill="#22d3ee" fillOpacity={0.1} isAnimationActive={false} />
+                    </AreaChart>
+                </ResponsiveContainer>
+            </div>
         </motion.div>
 
-        {/* RIGHT COLUMN */}
-        <motion.div variants={gridContainer} className="lg:col-span-5 flex flex-col gap-6">
-            <motion.div variants={panelVariant} className="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 relative overflow-hidden">
-                <div className="flex justify-between items-start mb-2 relative z-10">
-                    <div>
-                        <span className="text-[10px] text-slate-500 tracking-[0.3em] uppercase font-bold flex items-center gap-2"><Activity size={10} /> Risk Sentinel</span>
-                        <h3 className="text-white font-bold text-lg mt-1">Account Health</h3>
-                    </div>
-                    <div className="text-right">
-                         <span className="text-[10px] text-slate-500 uppercase tracking-widest block">Health Factor</span>
-                         <span className={`text-2xl font-black tracking-tighter ${healthFactor === 'SAFE' ? 'text-green-400' : Number(healthFactor) < 1.5 ? 'text-red-500' : 'text-yellow-400'}`}>{healthFactor}</span>
-                    </div>
-                </div>
-                
-                {/* Visual Risk Heatmap */}
-                <HealthBar factor={healthFactor} />
+        {/* RISK SENTINEL — RADIAL GAUGE */}
+        <motion.div
+          variants={panelVariant}
+          className={`lg:col-span-4 lg:row-span-2 ${GLASS} p-6 relative overflow-hidden flex flex-col ${risk.critical ? 'animate-strobe-crimson' : ''}`}
+          style={!risk.critical ? { borderColor: `${risk.color}40` } : undefined}
+        >
+            <div className="flex items-center justify-between mb-4">
+                <span className="text-[10px] text-slate-500 tracking-[0.3em] uppercase font-bold flex items-center gap-2"><Activity size={10} /> Risk Sentinel</span>
+                <span className="text-[9px] uppercase tracking-widest px-2 py-0.5 rounded-full border" style={{ color: risk.color, borderColor: `${risk.color}55` }}>{risk.label}</span>
+            </div>
 
-                <div className="grid grid-cols-3 gap-2 relative z-10 mt-6">
-                    <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Collateral</span><span className="text-sm font-mono text-white">${totalCollateralUSD}</span></div>
-                    <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Debt</span><span className="text-sm font-mono text-red-300">${totalDebtUSD}</span></div>
-                    <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Power</span><span className="text-sm font-mono text-blue-300">${borrowPowerUSD}</span></div>
-                </div>
-            </motion.div>
+            <div className="flex-1 flex flex-col items-center justify-center">
+                <HealthRadial factor={healthFactor} />
+                <span className="text-[10px] text-slate-500 uppercase tracking-widest mt-3">Liquidation Health Factor</span>
+            </div>
 
-            {/* EXECUTION ENGINE */}
-            <motion.div variants={panelVariant} className="flex-1 bg-slate-900/40 border border-slate-800 rounded-3xl p-6 flex flex-col relative">
-                <div className="flex p-1 bg-black rounded-xl mb-6 border border-slate-800">
-                    <button onClick={() => { setMode('EARN'); runTxSimulation('earn'); }} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'EARN' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white'}`}>🛡️ Earn (ETH)</button>
-                    <button onClick={() => setMode('LEVERAGE')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'LEVERAGE' ? 'bg-purple-600 text-white' : 'text-slate-500 hover:text-white'}`}>⚔️ Leverage (USDC)</button>
-                </div>
-                
-                <h3 className="text-[10px] text-slate-500 uppercase tracking-[0.3em] mb-4 font-bold">
-                    {mode === 'EARN' ? 'Collateral Management' : 'Debt Acquisition'}
-                </h3>
-                
-                <div className="relative mb-4">
-                    <input 
-                      type="number" 
-                      placeholder="0.00" 
-                      value={amount} 
-                      onChange={(e) => setAmount(e.target.value)} 
-                      className="w-full bg-black border border-slate-700 rounded-xl py-4 pl-4 pr-16 text-2xl font-mono text-white focus:outline-none focus:border-blue-500 transition-colors" 
-                    />
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2">
-                      <button 
-                        onClick={startVoiceCommand}
-                        className={`p-2 rounded-lg transition-all active:scale-90 ${isListening ? 'text-red-500 bg-red-900/20 animate-pulse' : 'text-green-500 hover:bg-white/5'}`}
-                        title="Activate Neural Link"
-                      >
-                        {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-                      </button>
-                    </div>
-                </div>
+            <div className="grid grid-cols-3 gap-2 mt-6">
+                <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Collateral</span><span className="text-sm font-mono text-white tabular-nums">${totalCollateralUSD}</span></div>
+                <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Debt</span><span className="text-sm font-mono text-red-300 tabular-nums">${totalDebtUSD}</span></div>
+                <div className="bg-black/40 p-3 rounded-xl border border-white/5"><span className="text-[9px] text-slate-500 uppercase block mb-1">Power</span><span className="text-sm font-mono text-cyan-300 tabular-nums">${borrowPowerUSD}</span></div>
+            </div>
+        </motion.div>
 
-                <div className="grid grid-cols-2 gap-4">
-                    <button onClick={() => mode === 'EARN' ? runTxSimulation('supply') : handleExecute('PRIMARY')} disabled={isPending || isConfirming || isSimulating} className={`py-4 rounded-xl font-black tracking-widest uppercase text-xs shadow-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50 ${mode === 'EARN' ? 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/30' : 'bg-purple-600 hover:bg-purple-500 shadow-purple-900/30'}`}>
-                       {(isPending || isSimulating) ? <Activity className="animate-spin" size={16}/> : mode === 'EARN' ? <Zap size={16}/> : <Coins size={16}/>}
-                       {mode === 'EARN' ? 'Supply' : 'Borrow'}
-                    </button>
+        {/* TERMINAL */}
+        <motion.div variants={panelVariant} className={`lg:col-span-4 h-72 ${GLASS} bg-black/60 p-4 font-mono text-xs flex flex-col relative overflow-hidden`}>
+             <div className="absolute top-2 right-4 text-[9px] text-slate-600 uppercase tracking-widest flex items-center gap-1"><Terminal size={10} /> Neural Logs</div>
+             <div className="flex-1 overflow-y-auto space-y-1 pr-2 scrollbar-hide" ref={logContainerRef}>{logs.map((log, i) => <LogLine key={i} text={log} />)}</div>
+             <div className="mt-2 pt-2 border-t border-white/10 text-cyan-300/70 italic text-[10px] truncate">{advice}</div>
+             <form onSubmit={handleCommandSubmit} className="mt-1 flex items-center text-cyan-300">
+                <span className="text-cyan-600 mr-2 shrink-0">root@aegis:~$</span>
+                <input
+                  type="text"
+                  value={command}
+                  onChange={(e) => setCommand(e.target.value)}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="type 'help' or press ⌘K"
+                  className="flex-1 bg-transparent border-none outline-none text-cyan-200 placeholder:text-slate-700 font-mono caret-cyan-400"
+                />
+             </form>
+        </motion.div>
 
-                    <button onClick={() => handleExecute('SECONDARY')} disabled={isPending || isConfirming} className="border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 hover:bg-white/5 py-4 rounded-xl font-bold tracking-widest uppercase text-xs flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50">
-                        {mode === 'EARN' ? <RotateCcw size={16}/> : needsApproval ? <Lock size={16}/> : <Unlock size={16}/>}
-                        {mode === 'EARN' ? 'Recall' : needsApproval ? 'Unlock USDC' : 'Repay Debt'}
-                    </button>
+        {/* EXECUTION ENGINE */}
+        <motion.div variants={panelVariant} className={`lg:col-span-4 h-72 ${GLASS} p-6 flex flex-col relative overflow-hidden`}>
+            <div className="flex p-1 bg-black/60 rounded-xl mb-5 border border-white/10">
+                <button onClick={() => setMode('EARN')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'EARN' ? 'bg-cyan-500 text-slate-950' : 'text-slate-500 hover:text-white'}`}>🛡️ Earn (ETH)</button>
+                <button onClick={() => setMode('LEVERAGE')} className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${mode === 'LEVERAGE' ? 'bg-purple-600 text-white' : 'text-slate-500 hover:text-white'}`}>⚔️ Leverage (USDC)</button>
+            </div>
+
+            <h3 className="text-[10px] text-slate-500 uppercase tracking-[0.3em] mb-3 font-bold">
+                {mode === 'EARN' ? 'Collateral Management' : 'Debt Acquisition'}
+            </h3>
+
+            <div className="relative mb-4">
+                <input
+                  type="number"
+                  placeholder="0.00"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="w-full bg-black/60 border border-white/10 rounded-xl py-4 pl-4 pr-16 text-2xl font-mono text-white focus:outline-none focus:border-cyan-500 transition-colors tabular-nums"
+                />
+                <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                  <button
+                    onClick={startVoiceCommand}
+                    className={`p-2 rounded-lg transition-all active:scale-90 ${isListening ? 'text-red-500 bg-red-900/20 animate-pulse' : 'text-cyan-400 hover:bg-white/5'}`}
+                    title="Activate Neural Link"
+                  >
+                    {isListening ? <MicOff size={20} /> : <Mic size={20} />}
+                  </button>
                 </div>
-            </motion.div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 mt-auto">
+                <button onClick={() => mode === 'EARN' ? openStaging('supply') : handleExecute('PRIMARY')} disabled={isPending || isConfirming || isSimulating} className={`py-4 rounded-xl font-black tracking-widest uppercase text-xs shadow-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50 ${mode === 'EARN' ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-cyan-900/30' : 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-900/30'}`}>
+                   {(isPending || isSimulating) ? <Activity className="animate-spin" size={16}/> : mode === 'EARN' ? <Zap size={16}/> : <Coins size={16}/>}
+                   {mode === 'EARN' ? 'Supply' : 'Borrow'}
+                </button>
+
+                <button onClick={() => handleExecute('SECONDARY')} disabled={isPending || isConfirming} className="border border-white/10 text-slate-400 hover:text-white hover:border-white/20 hover:bg-white/5 py-4 rounded-xl font-bold tracking-widest uppercase text-xs flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50">
+                    {mode === 'EARN' ? <RotateCcw size={16}/> : needsApproval ? <Lock size={16}/> : <Unlock size={16}/>}
+                    {mode === 'EARN' ? 'Recall' : needsApproval ? 'Unlock USDC' : 'Repay Debt'}
+                </button>
+            </div>
+
+            {/* Pre-Execution Staging Overlay (Shadow Simulation Sheet) */}
+            <AnimatePresence>
+              {staging && (
+                <StagingSheet
+                  kind={staging.kind}
+                  amount={staging.amount}
+                  gas={staging.gas}
+                  slippage={staging.slippage}
+                  onConfirm={confirmStaging}
+                  onCancel={() => setStaging(null)}
+                />
+              )}
+            </AnimatePresence>
         </motion.div>
       </motion.div>
+
+      {/* GLOBAL COMMAND PALETTE */}
+      <AnimatePresence>
+        {paletteOpen && (
+          <CommandPalette onRun={processCommand} onClose={() => setPaletteOpen(false)} />
+        )}
+      </AnimatePresence>
     </main>
   );
 }

@@ -6,12 +6,14 @@ import AmbientBackground from './components/AmbientBackground';
 import HealthRadial, { getRisk, healthToValue } from './components/HealthRadial';
 import CommandPalette from './components/CommandPalette';
 import StagingSheet from './components/StagingSheet';
+import NetworkSwitcher from './components/NetworkSwitcher';
+import GasTicker from './components/GasTicker';
 import {
   ShieldCheck, Activity, Zap, RotateCcw, Wallet, Terminal,
   Coins, Lock, Unlock, Mic, MicOff, Command as CommandIcon
 } from 'lucide-react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber } from 'wagmi';
+import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber, useChainId } from 'wagmi';
 import { sepolia } from 'wagmi/chains';
 import { parseEther, formatEther, parseUnits } from 'viem';
 import { AreaChart, Area, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
@@ -96,6 +98,8 @@ export default function Home() {
 
   // --- WAGMI ---
   const { address: userAddress, isConnected } = useAccount();
+  // Active network — drives the switcher HUD, gas ticker, and chain-isolated history.
+  const chainId = useChainId();
   const { data: hash, writeContract, isPending } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash });
 
@@ -350,28 +354,35 @@ export default function Home() {
   // localStorage here in the initializer would break SSR hydration, so we load
   // it in an effect instead.
   const [chartData, setChartData] = useState<{ name: string; value: number }[]>([]);
-  // Tracks which wallet the current chartData belongs to, so the balance
-  // listener never appends to a series that hasn't been (re)loaded yet.
+  // Tracks which wallet+chain session the current chartData belongs to, so the
+  // balance listener never appends to a series that hasn't been (re)loaded yet.
   const historyAddrRef = useRef<string | null>(null);
-  const historyKey = (addr: string) => `chart_history_${addr}`;
+  // localStorage is isolated by BOTH address and chain so a series from one
+  // network can never leak into another.
+  const historyKey = (addr: string, chain: number) => `chart_history_${addr}_${chain}`;
+  // Composite session identity used to detect address/chain changes.
+  const sessionKey = userAddress ? `${userAddress}_${chainId}` : null;
 
-  // Per-wallet history loader. Runs on every address change (incl. account
-  // switches in MetaMask): flush the previous series and load the new address's
-  // saved history, or reset to empty so the balance listener can re-seed it.
+  // History loader. Runs on every address OR chain change (incl. MetaMask
+  // account switches and network swaps): the split second the session changes we
+  // flush the previous series and load this address+chain's saved history, or
+  // reset to empty so the balance listener can re-seed it.
   useEffect(() => {
-    historyAddrRef.current = userAddress ?? null;
+    historyAddrRef.current = sessionKey;
     if (!userAddress) {
       setChartData([]);
       return;
     }
+    // Always flush first so no prior session's data is ever shown on the new one.
+    setChartData([]);
     try {
-      const saved = localStorage.getItem(historyKey(userAddress));
+      const saved = localStorage.getItem(historyKey(userAddress, chainId));
       const parsed = saved ? JSON.parse(saved) : null;
-      setChartData(Array.isArray(parsed) ? parsed : []);
+      if (Array.isArray(parsed) && parsed.length > 0) setChartData(parsed);
     } catch {
-      setChartData([]);
+      /* corrupt/unavailable storage — leave the flushed empty grid */
     }
-  }, [userAddress]);
+  }, [userAddress, chainId]);
 
   // Listen to the live balance coming from our wallet hook. The first reading
   // seeds the series as the baseline coordinate; afterwards, whenever the balance
@@ -380,8 +391,8 @@ export default function Home() {
     // Prefer the native ETH balance; fall back to the staked aToken balance.
     const active = liveEthBalance > 0 ? liveEthBalance : rawABalance;
     if (!userAddress || active <= 0) return;
-    // Wait until the loader has synced history for this exact address.
-    if (historyAddrRef.current !== userAddress) return;
+    // Wait until the loader has synced history for this exact address+chain session.
+    if (historyAddrRef.current !== sessionKey) return;
 
     const point = parseFloat(active.toFixed(6));
     setChartData(prev => {
@@ -404,19 +415,19 @@ export default function Home() {
       // Keep a rolling window so the series stays readable over a long session.
       return next.slice(-40);
     });
-  }, [liveEthBalance, rawABalance, userAddress]);
+  }, [liveEthBalance, rawABalance, userAddress, chainId, sessionKey]);
 
-  // Persist the series back to localStorage under the active wallet's key
-  // whenever it changes (seed or append), so history survives reloads per wallet.
+  // Persist the series back to localStorage under the active wallet+chain key
+  // whenever it changes (seed or append), so history survives reloads per session.
   useEffect(() => {
-    if (!userAddress || historyAddrRef.current !== userAddress) return;
+    if (!userAddress || historyAddrRef.current !== sessionKey) return;
     if (chartData.length === 0) return;
     try {
-      localStorage.setItem(historyKey(userAddress), JSON.stringify(chartData));
+      localStorage.setItem(historyKey(userAddress, chainId), JSON.stringify(chartData));
     } catch {
       /* storage unavailable / quota exceeded — non-fatal */
     }
-  }, [chartData, userAddress]);
+  }, [chartData, userAddress, chainId, sessionKey]);
 
   // Tight, data-driven Y-axis bounds so even a 0.0001 ETH change renders as a
   // visible dip/spike instead of being flattened against a 0-based axis.
@@ -625,6 +636,7 @@ export default function Home() {
             <CommandIcon size={12} /> <span className="tracking-widest uppercase">Command</span>
             <kbd className="text-[9px] text-slate-500 border border-white/10 rounded px-1">⌘K</kbd>
           </button>
+          <NetworkSwitcher />
           {userAddress && (
             <div className="hidden sm:flex flex-col items-end leading-tight">
               <span className="text-[10px] text-slate-500 uppercase tracking-widest flex items-center gap-1">
@@ -638,6 +650,9 @@ export default function Home() {
           <ConnectButton showBalance={false} chainStatus="icon" />
         </div>
       </header>
+
+      {/* LIVE GAS FEE TICKER (chain-aware; remounts on network switch) */}
+      <GasTicker key={chainId} chainId={chainId} />
 
       {/* TACTICAL BENTO GRID */}
       <motion.div

@@ -50,3 +50,10 @@ body {
   box-shadow: 0 0 18px rgba(245, 158, 11, 0.22), inset 0 0 12px rgba(245, 158, 11, 0.08);
 }
 .text-glow-cyan { text-shadow: 0 0 12px rgba(34, 211, 238, 0.55); }
+
+/* Seamless horizontal gas-ticker marquee (two duplicated groups -> -50%). */
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.animate-marquee { animation: marquee 24s linear infinite; }

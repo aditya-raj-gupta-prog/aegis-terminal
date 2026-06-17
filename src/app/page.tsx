@@ -15,9 +15,9 @@ import {
 } from 'lucide-react';
 import { useAudioTelemetry } from '@/lib/useAudioTelemetry';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber, useChainId, useEnsName, useEnsAvatar } from 'wagmi';
+import { useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContract, useBalance, useBlockNumber, useChainId, useEnsName, useEnsAvatar, usePublicClient } from 'wagmi';
 import { sepolia, mainnet } from 'wagmi/chains';
-import { parseEther, formatEther, parseUnits } from 'viem';
+import { parseEther, formatEther, parseUnits, formatGwei } from 'viem';
 import { AreaChart, Area, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import {
   WRAPPED_TOKEN_GATEWAY_ADDRESS,
@@ -520,6 +520,39 @@ export default function Home() {
     refetchABalance();
     refetchAccount();
   }, [blockNumber, userAddress]);
+
+  // --- LIVE BLOCK TELEMETRY FEED ---
+  // Subscribe to new blocks on the active chain via the viem public client and
+  // stream a stylized entry into the Neural Logs. The subscription is keyed on
+  // publicClient + chainId, so switching networks via the HUD cleanly tears the
+  // old watcher down and re-initializes for the new chain. The FIFO cap inside
+  // addLog keeps the buffer bounded so the background loop never bloats memory.
+  const publicClient = usePublicClient();
+  useEffect(() => {
+    if (!publicClient) return;
+    const isL2 = chainId === 42161 || chainId === 10;
+
+    const unwatch = publicClient.watchBlocks({
+      emitMissed: false,
+      // L2s mint far faster — sample on a calmer cadence so the feed reads as
+      // batch-confirmation pulses rather than flooding the console.
+      pollingInterval: isL2 ? 3000 : 8000,
+      onBlock: (block) => {
+        const gwei = block.baseFeePerGas ? Number(formatGwei(block.baseFeePerGas)).toFixed(1) : '—';
+        const txns = block.transactions.length;
+        if (isL2) {
+          addLog(`⚡ [L2 BATCH #${block.number}] Sequencer Pulse | Base: ${gwei} Gwei | Txns: ${txns}`);
+        } else {
+          addLog(`📦 [BLOCK #${block.number}] Gas Price: ${gwei} Gwei | Transactions: ${txns}`);
+        }
+      },
+      onError: () => {
+        addLog("[SYS] Block telemetry stream interrupted — retrying...");
+      },
+    });
+
+    return () => unwatch();
+  }, [publicClient, chainId]);
 
   const needsApproval = useMemo(() => {
      if (mode === 'EARN') return false;

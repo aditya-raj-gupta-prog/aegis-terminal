@@ -5,9 +5,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import AmbientBackground from './components/AmbientBackground';
 import HealthRadial, { getRisk, healthToValue } from './components/HealthRadial';
 import CommandPalette from './components/CommandPalette';
-import StagingSheet from './components/StagingSheet';
+import StagingSheet, { type MevCheck } from './components/StagingSheet';
 import NetworkSwitcher from './components/NetworkSwitcher';
 import GasTicker from './components/GasTicker';
+import ContractInspector from './components/ContractInspector';
 import {
   ShieldCheck, Activity, Zap, RotateCcw, Wallet, Terminal,
   Coins, Lock, Unlock, Mic, MicOff, Command as CommandIcon,
@@ -92,7 +93,9 @@ export default function Home() {
   const [isSimulating, setIsSimulating] = useState(false);
   // Global command palette (Ctrl/Cmd+K) and the pre-execution staging sheet.
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [staging, setStaging] = useState<{ kind: 'supply' | 'earn'; amount: string; gas: string; slippage: string } | null>(null);
+  const [staging, setStaging] = useState<{ kind: 'supply' | 'earn'; amount: string; gas: string; slippage: string; checks: MevCheck[] } | null>(null);
+  // Live verified-contract explorer target (set by `/scan [address]`).
+  const [inspector, setInspector] = useState<string | null>(null);
   // Split-pane tiling toggle (Alt+S or `/split`): graph + terminal side by side.
   const [splitView, setSplitView] = useState(false);
   const lastFetchTime = useRef(0);
@@ -169,12 +172,32 @@ export default function Home() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [logs]);
 
-  // Mock pre-flight metrics. Called only from event handlers / the command
-  // processor (never during render), so Math.random is safe here.
-  const mockPreflight = () => ({
-    gas: (18 + Math.random() * 10).toFixed(1),
-    slippage: (0.05 + Math.random() * 0.25).toFixed(2),
-  });
+  // Mock pre-flight metrics + MEV-shield scorecard. Called only from event
+  // handlers / the command processor (never during render), so Math.random is
+  // safe here. Statuses are randomized so the checklist surfaces realistic
+  // pass / warn / crit states.
+  const mockPreflight = () => {
+    const gas = (18 + Math.random() * 10).toFixed(1);
+    const slippage = (0.05 + Math.random() * 0.25).toFixed(2);
+    const r = Math.random();
+    const mempool: MevCheck =
+      r > 0.82
+        ? { label: 'Public Mempool Scan', status: 'crit', detail: 'Sandwich threat detected in mempool' }
+        : r > 0.5
+        ? { label: 'Public Mempool Scan', status: 'warn', detail: 'Elevated searcher bot activity' }
+        : { label: 'Public Mempool Scan', status: 'pass', detail: 'No adversarial bundles observed' };
+    const checks: MevCheck[] = [
+      { label: 'Slippage Guard', status: 'pass', detail: `Bound active at ±${slippage}%` },
+      {
+        label: 'Gas Priority Overhead',
+        status: parseFloat(gas) > 25 ? 'warn' : 'pass',
+        detail: `Priority tip ~${gas} Gwei`,
+      },
+      mempool,
+      { label: 'Router Calldata Integrity', status: 'pass', detail: 'Calldata hash verified' },
+    ];
+    return { gas, slippage, checks };
+  };
 
   // --- INTERACTIVE TERMINAL ---
   // Parse and dispatch a typed command against the local terminal engine. Accepts
@@ -228,7 +251,7 @@ export default function Home() {
           "  clear           wipe the log buffer",
           "  check-gas       fetch real-time network gas metrics",
           "  gas-priority    alias for check-gas",
-          "  scan [address]  run a Web3 security analysis on an address",
+          "  scan [address]  audit + open the live Contract Inspector",
           "  supply [amount] open the pre-flight staging sheet",
           "  status          report core engine vitals",
           "  split           toggle split-pane tiling (graph + logs)",
@@ -255,6 +278,13 @@ export default function Home() {
           "[SEC] Scanning for unlimited approvals... clean.",
           "[SEC] Risk Score: LOW. No critical vulnerabilities detected.",
         ]);
+        // Launch the live verified-contract explorer for valid addresses.
+        if (/^0x[a-fA-F0-9]{40}$/.test(target)) {
+          addLog("[SEC] Fetching verified ABI from Sourcify — opening Contract Inspector...");
+          setInspector(target);
+        } else {
+          addLog("[SEC] Invalid address format — explorer skipped.");
+        }
         break;
       }
       case 'supply': {
@@ -947,9 +977,17 @@ export default function Home() {
             amount={staging.amount}
             gas={staging.gas}
             slippage={staging.slippage}
+            checks={staging.checks}
             onConfirm={confirmStaging}
             onCancel={() => setStaging(null)}
           />
+        )}
+      </AnimatePresence>
+
+      {/* LIVE VERIFIED CONTRACT EXPLORER */}
+      <AnimatePresence>
+        {inspector && (
+          <ContractInspector address={inspector} onClose={() => setInspector(null)} />
         )}
       </AnimatePresence>
     </main>
